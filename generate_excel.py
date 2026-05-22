@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - 老板汇报版 v10.1
+"""电商业绩分析老板看板 - 老板汇报版 v10.2
 
-更新：
-- 重复客户视为正常业务过程，不再作为异常
-- 订单唯一校验口径：客户姓名 + 客户电话
-- 销售公司默认等于公司主体
-- 保留异常校验：缺手机号、疑似重复收款；销售公司缺失不再报异常
+兼容性更新：
+- 将 `dt.date | None` 改为旧版 Python 兼容写法 `Optional[dt.date]`
+- 兼容较旧的 macOS 自带 python3 环境
+- 保持现有老板看板、异常校验、进线产值等功能不变
 
 输出文件：电商业绩分析老板看板.xlsx
 依赖：pip install openpyxl
@@ -16,6 +15,7 @@ import os
 import datetime as dt
 from dataclasses import dataclass
 from collections import defaultdict, Counter
+from typing import Optional
 
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -76,7 +76,7 @@ def set_col_width(ws, widths):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def parse_date(s: str):
+def parse_date(s):
     s = (s or "").strip().replace("-", "/")
     if not s:
         return None
@@ -117,7 +117,7 @@ def pick(d, *names):
 @dataclass
 class Tx:
     biz_date: dt.date
-    lead_date: dt.date | None
+    lead_date: Optional[dt.date]
     company: str
     sales_company: str
     seller: str
@@ -137,7 +137,7 @@ class Tx:
         name = (self.customer or "").strip()
         phone = (self.phone or "").strip()
         if name and phone:
-            return f"{name}|{phone}"
+            return "%s|%s" % (name, phone)
         return phone or name
 
 
@@ -199,7 +199,7 @@ def summarize_orders(txs):
         receivable_tail = total_price - SIGNUP_FEE if total_price else 0
         received_tail = max(a["tail"], a["full"] - SIGNUP_FEE if a["full"] > 0 else 0)
         unpaid_tail = receivable_tail - received_tail if total_price else 0
-        tail_rate = f"{(received_tail / receivable_tail):.1%}" if total_price and receivable_tail > 0 and (a["tail"] > 0 or a["full"] > 0) else "--"
+        tail_rate = ("%.1f%%" % ((received_tail * 100.0 / receivable_tail))) if total_price and receivable_tail > 0 and (a["tail"] > 0 or a["full"] > 0) else "--"
         gross = first_payment + a["tail"] + a["full"]
         net = gross - a["refund"]
         refund_status = "未退款"
@@ -229,9 +229,9 @@ def summarize_seller(order_rows):
         a["un"] += r[12] if isinstance(r[12], int) else 0
     rows = []
     for seller, a in agg.items():
-        refund_rate = (a["refund"] / a["gross"]) if a["gross"] else 0
-        tail_rate = (a["got"] / a["rec"]) if a["rec"] else None
-        rows.append([seller, ",".join(sorted(a["company"])), ",".join(sorted(a["sales_company"])), a["customers"], a["gross"], a["net"], a["refund"], f"{refund_rate:.1%}", a["rec"], a["got"], a["un"], f"{tail_rate:.1%}" if tail_rate is not None else "--", 0])
+        refund_rate = (a["refund"] / float(a["gross"])) if a["gross"] else 0
+        tail_rate = (a["got"] / float(a["rec"])) if a["rec"] else None
+        rows.append([seller, ",".join(sorted(a["company"])), ",".join(sorted(a["sales_company"])), a["customers"], a["gross"], a["net"], a["refund"], "%.1f%%" % (refund_rate * 100), a["rec"], a["got"], a["un"], ("%.1f%%" % (tail_rate * 100)) if tail_rate is not None else "--", 0])
     rows.sort(key=lambda x: x[5], reverse=True)
     for i, r in enumerate(rows, 1):
         r[-1] = i
@@ -253,9 +253,9 @@ def summarize_group(order_rows, idx, key_name):
         a["un"] += r[12] if isinstance(r[12], int) else 0
     rows = []
     for k, a in agg.items():
-        refund_rate = (a["refund"] / a["gross"]) if a["gross"] else 0
-        tail_rate = (a["got"] / a["rec"]) if a["rec"] else None
-        rows.append([k, a["orders"], a["gross"], a["net"], a["refund"], f"{refund_rate:.1%}", a["rec"], a["got"], a["un"], f"{tail_rate:.1%}" if tail_rate is not None else "--"])
+        refund_rate = (a["refund"] / float(a["gross"])) if a["gross"] else 0
+        tail_rate = (a["got"] / float(a["rec"])) if a["rec"] else None
+        rows.append([k, a["orders"], a["gross"], a["net"], a["refund"], "%.1f%%" % (refund_rate * 100), a["rec"], a["got"], a["un"], ("%.1f%%" % (tail_rate * 100)) if tail_rate is not None else "--"])
     rows.sort(key=lambda x: x[3], reverse=True)
     headers = [key_name, "订单数", "实收业绩", "净业绩", "退款金额", "退款率", "应收尾款", "已收尾款", "未收尾款", "尾款回收率"]
     return headers, rows
@@ -289,8 +289,8 @@ def summarize_lead_value(txs):
     summary_rows = [[lead_date, len(a["customers"]), a["deposit"], a["signup"], a["tail"], a["full"], a["refund"], a["gross"], a["net"]] for lead_date, a in sorted(agg.items())]
     seller_rows = []
     for (lead_date, seller), a in sorted(seller_agg.items(), key=lambda x: (x[0][0], -x[1]["net"])):
-        refund_rate = (a["refund"] / a["gross"]) if a["gross"] else 0
-        seller_rows.append([lead_date, seller, len(a["customers"]), a["gross"], a["net"], a["refund"], f"{refund_rate:.1%}"])
+        refund_rate = (a["refund"] / float(a["gross"])) if a["gross"] else 0
+        seller_rows.append([lead_date, seller, len(a["customers"]), a["gross"], a["net"], a["refund"], "%.1f%%" % (refund_rate * 100)])
     return summary_rows, seller_rows, detail_rows
 
 
@@ -303,7 +303,7 @@ def build_abnormal_checks(txs):
     for key, cnt in pay_counter.items():
         customer, phone, biz_date, deposit, signup, tail, full, refund = key
         if cnt > 1 and (deposit or signup or tail or full or refund):
-            rows.append(["疑似重复收款", "", "", customer, biz_date, f"同客户同电话同日同金额记录数={cnt}"])
+            rows.append(["疑似重复收款", "", "", customer, biz_date, "同客户同电话同日同金额记录数=%s" % cnt])
     headers = ["异常类型", "公司主体", "销售", "客户", "日期/电话", "说明"]
     return headers, rows
 
@@ -346,7 +346,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     ws["A1"].font = TITLE_FONT
     ws["A1"].alignment = CENTER
     ws.merge_cells("A2:L2")
-    ws["A2"] = f"汇报日期：{dt.date.today().isoformat()}  |  数据来源：sheet1-业绩流水表.csv  |  订单唯一口径=客户姓名+客户电话  |  销售公司=公司主体"
+    ws["A2"] = "汇报日期：%s  |  数据来源：sheet1-业绩流水表.csv  |  订单唯一口径=客户姓名+客户电话  |  销售公司=公司主体" % dt.date.today().isoformat()
     ws["A2"].fill = TITLE_FILL
     ws["A2"].font = SUBTITLE_FONT
     ws["A2"].alignment = CENTER
@@ -356,13 +356,13 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     total_refund = sum(r[16] for r in order_rows if isinstance(r[16], int))
     total_orders = len(order_rows)
     abnormal_count = len(abnormal_rows)
-    refund_rate = (total_refund / total_gross) if total_gross else None
+    refund_rate = (total_refund / float(total_gross)) if total_gross else None
 
     kpis = [
         ("总实收业绩", total_gross, CARD_BLUE),
         ("总净业绩", total_net, CARD_GREEN),
         ("总退款金额", total_refund, CARD_RED),
-        ("退款率", f"{refund_rate:.1%}" if refund_rate is not None else "--", CARD_ORANGE),
+        ("退款率", ("%.1f%%" % (refund_rate * 100)) if refund_rate is not None else "--", CARD_ORANGE),
         ("订单数", total_orders, CARD_DARK),
         ("异常条数", abnormal_count, CARD_RED if abnormal_count else CARD_GREEN),
     ]
@@ -393,7 +393,8 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     lead_base = 40
     ws.cell(row=2, column=lead_base, value="进线日期")
     ws.cell(row=2, column=lead_base + 1, value="净产值")
-    for i, row in enumerate(sorted(lead_summary_rows, key=lambda x: x[8], reverse=True)[:10], 3):
+    top_leads = sorted(lead_summary_rows, key=lambda x: x[8], reverse=True)[:10]
+    for i, row in enumerate(top_leads, 3):
         ws.cell(row=i, column=lead_base, value=row[0])
         ws.cell(row=i, column=lead_base + 1, value=row[8])
 
@@ -416,7 +417,8 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     ws.cell(row=2, column=trend_base, value="日期")
     ws.cell(row=2, column=trend_base + 1, value="净流入")
     trend_items = sorted(day_map.items())
-    for i, (d, v) in enumerate(trend_items, 3):
+    for i, item in enumerate(trend_items, 3):
+        d, v = item
         ws.cell(row=i, column=trend_base, value=d)
         ws.cell(row=i, column=trend_base + 1, value=v)
 
@@ -440,14 +442,15 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     chart2.series[0].graphicalProperties.solidFill = "52C41A"
     ws.add_chart(chart2, "G9")
 
-    chart3 = LineChart()
-    chart3.title = "每日净流入趋势"
-    chart3.width = 17
-    chart3.height = 8
-    chart3.add_data(Reference(ws, min_col=trend_base + 1, min_row=2, max_row=2 + len(trend_items)), titles_from_data=True)
-    chart3.set_categories(Reference(ws, min_col=trend_base, min_row=3, max_row=2 + len(trend_items)))
-    chart3.series[0].graphicalProperties.line.solidFill = "FA8C16"
-    ws.add_chart(chart3, "A26")
+    if trend_items:
+        chart3 = LineChart()
+        chart3.title = "每日净流入趋势"
+        chart3.width = 17
+        chart3.height = 8
+        chart3.add_data(Reference(ws, min_col=trend_base + 1, min_row=2, max_row=2 + len(trend_items)), titles_from_data=True)
+        chart3.set_categories(Reference(ws, min_col=trend_base, min_row=3, max_row=2 + len(trend_items)))
+        chart3.series[0].graphicalProperties.line.solidFill = "FA8C16"
+        ws.add_chart(chart3, "A26")
 
     chart4 = PieChart()
     chart4.title = "收款结构占比"
@@ -531,13 +534,10 @@ def main():
     write_sheet_table(ws1, "原始流水", raw_headers, raw_rows, widths=[12, 10, 12, 10, 10, 8, 14, 12, 10, 10, 10, 10, 10, 10, 20])
 
     ws2 = wb.create_sheet("客户订单汇总")
-    write_sheet_table(ws2, "客户订单汇总", order_headers, order_rows,
-                      widths=[10, 12, 10, 10, 14, 12, 10, 10, 12, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-                      highlight={"col": "退款状态", "rules": {"已退款": RED_FONT, "部分退款": ORANGE_FONT, "未退款": GREEN_FONT}})
+    write_sheet_table(ws2, "客户订单汇总", order_headers, order_rows, widths=[10, 12, 10, 10, 14, 12, 10, 10, 12, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], highlight={"col": "退款状态", "rules": {"已退款": RED_FONT, "部分退款": ORANGE_FONT, "未退款": GREEN_FONT}})
 
     ws3 = wb.create_sheet("销售业绩汇总")
-    write_sheet_table(ws3, "销售业绩汇总", seller_headers, seller_rows,
-                      widths=[10, 18, 18, 10, 12, 12, 10, 10, 10, 10, 10, 10, 8])
+    write_sheet_table(ws3, "销售业绩汇总", seller_headers, seller_rows, widths=[10, 18, 18, 10, 12, 12, 10, 10, 10, 10, 10, 10, 8])
 
     ws4 = wb.create_sheet("销售公司业绩汇总")
     write_sheet_table(ws4, "销售公司业绩汇总", sales_company_headers, sales_company_rows)
@@ -546,22 +546,19 @@ def main():
     write_sheet_table(ws5, "公司主体业绩汇总", company_headers, company_rows)
 
     ws6 = wb.create_sheet("进线产值汇总")
-    write_sheet_table(ws6, "进线产值汇总", ["进线日期", "客户数", "订金", "报名费", "尾款", "全款", "退款", "实收产值", "净产值"], lead_summary_rows,
-                      widths=[12, 10, 10, 10, 10, 10, 10, 12, 12])
+    write_sheet_table(ws6, "进线产值汇总", ["进线日期", "客户数", "订金", "报名费", "尾款", "全款", "退款", "实收产值", "净产值"], lead_summary_rows, widths=[12, 10, 10, 10, 10, 10, 10, 12, 12])
 
     ws7 = wb.create_sheet("进线产值-销售")
-    write_sheet_table(ws7, "进线产值-销售分析", ["进线日期", "销售", "客户数", "实收产值", "净产值", "退款金额", "退款率"], lead_seller_rows,
-                      widths=[12, 10, 10, 12, 12, 12, 10])
+    write_sheet_table(ws7, "进线产值-销售分析", ["进线日期", "销售", "客户数", "实收产值", "净产值", "退款金额", "退款率"], lead_seller_rows, widths=[12, 10, 10, 12, 12, 12, 10])
 
     ws8 = wb.create_sheet("进线产值明细")
-    write_sheet_table(ws8, "进线产值明细", ["进线日期", "业务日期", "公司主体", "销售公司", "销售", "客户", "电话", "订金", "报名费", "尾款", "全款", "退款", "实收产值", "净产值", "备注"], lead_detail_rows,
-                      widths=[12, 12, 10, 12, 10, 10, 14, 10, 10, 10, 10, 10, 12, 12, 20])
+    write_sheet_table(ws8, "进线产值明细", ["进线日期", "业务日期", "公司主体", "销售公司", "销售", "客户", "电话", "订金", "报名费", "尾款", "全款", "退款", "实收产值", "净产值", "备注"], lead_detail_rows, widths=[12, 12, 10, 12, 10, 10, 14, 10, 10, 10, 10, 10, 12, 12, 20])
 
     ws9 = wb.create_sheet("异常校验")
     write_sheet_table(ws9, "异常校验", abnormal_headers, abnormal_rows, widths=[14, 10, 10, 12, 14, 28])
 
     wb.save(OUTPUT_FILE)
-    print(f"✅ 已生成老板汇报版仪表盘：{OUTPUT_FILE}")
+    print("✅ 已生成老板汇报版仪表盘：%s" % OUTPUT_FILE)
 
 
 if __name__ == "__main__":
