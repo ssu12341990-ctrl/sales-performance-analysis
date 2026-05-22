@@ -1,28 +1,33 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - Excel 一键生成脚本 v4.0
+"""电商业绩分析老板看板 - Excel 一键生成脚本 v5.0（通用模板版）
 
-目标：把 data/ 下的原始流水 + 汇总表 + 老板看板图表，全部生成到一个 Excel 里，并新增“查询分析”Sheet，满足：
-1）每天每个公司主体总业绩 /（可扩展）三个销售公司总业绩
-2）某日（例如 2026/5/19）进线数据业绩查询
-3）某个销售业绩查询
-4）全款客户查询（可辅助判断尾款追缴能力）
-5）报名费客户查询（无尾款）（可辅助判断尾款追缴风险）
-6）周/月销售公司业绩/个人业绩
-7）周/月销售公司业绩/个人业绩（去退款净业绩）
+你后续只需要维护 data/sheet1-业绩流水表.csv（标准流水）即可自动生成：
+- 原始流水表
+- 客户订单汇总表（含产品总价/应收尾款/尾款回收率等）
+- 销售业绩汇总表（含尾款回收率排行）
+- 销售公司业绩汇总表
+- 公司主体业绩汇总表（含日/周/月）
+- 查询分析（按日/按进线日/按销售/全款/报名费无尾款/周月/净业绩等）
+- 图表分析（基于流水动态计算）
 
-运行方式：python generate_excel.py
+业务口径（已固化）：
+- 报名费固定：1800
+- 产品总价：由你在流水中录入（通常在“全款”行或任意一行填入）
+- 应收尾款 = 产品总价 - 1800
+- 只有报名费、还没补尾款：尾款回收率显示 “--”
+- 订单唯一标识：优先（客户电话），否则（客户姓名）
+
 依赖：pip install openpyxl
-输出：电商业绩分析老板看板_5月.xlsx
+运行：python generate_excel.py
+输出：电商业绩分析老板看板.xlsx
 
-说明：
-- v4.0 在 v3.0 的基础上新增 Sheet「查询分析」，并把关键汇总从流水表动态计算（不依赖手工汇总 CSV）。
-- 目前数据字段未包含“销售公司/销售团队/产品”等维度，因此「销售公司」相关报表先以“公司主体”替代；
-  若你补充销售公司字段，脚本可直接扩展。
+注意：当前仓库的 sheet1 CSV 还没有“销售公司/产品总价”列，脚本会自动兼容（缺失则为空/不计算）。
 """
 
 import csv
 import os
 import datetime as dt
+from dataclasses import dataclass
 from collections import defaultdict
 
 import openpyxl
@@ -31,13 +36,16 @@ from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.chart.series import DataPoint
 from openpyxl.utils import get_column_letter
 
-# ══════════════════════════════════════════
+
+SIGNUP_FEE = 1800
+OUTPUT_FILE = "电商业绩分析老板看板.xlsx"
+
+# ─────────────────────────────────────────
 # 样式
-# ══════════════════════════════════════════
+# ─────────────────────────────────────────
 HEADER_FILL = PatternFill("solid", fgColor="1890FF")
 SUB_FILL = PatternFill("solid", fgColor="E6F0FF")
 KPI_FILL = PatternFill("solid", fgColor="001529")
-KPI_VAL_FILL = PatternFill("solid", fgColor="0D2137")
 
 WHITE_BOLD = Font(bold=True, color="FFFFFF", size=11)
 DARK_BOLD = Font(bold=True, color="001529", size=11)
@@ -74,50 +82,34 @@ def style_row(ws, row, cols, fill=None, font=NORMAL, align=CENTER):
         cell.border = thin_border()
 
 
-def col_width(ws, widths):
+def set_col_width(ws, widths):
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-
-
-def read_csv_rows(filename):
-    """读取 data/ 下 CSV，返回 list[dict]"""
-    path = os.path.join("data", filename)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"找不到文件：{path}")
-    with open(path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
 
 
 def parse_date(s: str):
     s = (s or "").strip()
     if not s:
         return None
-    # 支持 2026/5/19 或 2026-05-19
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d", "%Y/%m/%d"):
-        try:
-            return dt.datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    # 兼容 2026/5/9 这种
+    s2 = s.replace("-", "/")
     try:
-        y, m, d = s.replace("-", "/").split("/")
+        y, m, d = s2.split("/")
         return dt.date(int(y), int(m), int(d))
     except Exception:
         return None
 
 
-def to_number(x):
+def to_int(x):
     if x is None:
         return 0
     if isinstance(x, (int, float)):
-        return x
+        return int(x)
     s = str(x).strip()
     if s == "":
         return 0
     try:
         return int(float(s))
-    except ValueError:
+    except Exception:
         return 0
 
 
@@ -129,517 +121,596 @@ def month_key(d: dt.date):
     return f"{d.year}年{d.month}月"
 
 
-def load_transactions():
-    """从 sheet1-业绩流水表.csv 加载标准流水"""
-    rows = read_csv_rows("sheet1-业绩流水表.csv")
+@dataclass
+class Tx:
+    biz_date: dt.date
+    lead_date: dt.date | None
+    company: str
+    sales_company: str
+    seller: str
+    customer: str
+    phone: str
+    typ: str
+    amount: int
+    total_price: int
+    note: str
 
-    txs = []
+    @property
+    def order_key(self):
+        p = (self.phone or "").strip()
+        if p:
+            return p
+        return (self.customer or "").strip()
+
+
+def read_csv_dicts(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"找不到文件：{path}")
+    with open(path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+
+def load_txs_from_sheet1():
+    rows = read_csv_dicts(os.path.join("data", "sheet1-业绩流水表.csv"))
+    txs: list[Tx] = []
+
     for r in rows:
         biz_date = parse_date(r.get("业务日期"))
-        lead_date = parse_date(r.get("客户进线日期"))
-        company = (r.get("公司主体") or "").strip()
-        seller = (r.get("销售姓名") or "").strip()
-        customer = (r.get("客户姓名") or "").strip()
-        phone = (r.get("客户电话") or "").strip()
-        typ = (r.get("类型") or "").strip()
-        amount = to_number(r.get("金额"))
-        note = (r.get("备注") or "").strip()
-
-        if not biz_date or not company or not seller or not customer or not typ:
-            # 容错：跳过异常行
+        if not biz_date:
             continue
 
-        txs.append(
-            {
-                "biz_date": biz_date,
-                "company": company,
-                "seller": seller,
-                "customer": customer,
-                "phone": phone,
-                "lead_date": lead_date,
-                "type": typ,
-                "amount": amount,
-                "note": note,
-            }
+        tx = Tx(
+            biz_date=biz_date,
+            lead_date=parse_date(r.get("客户进线日期")),
+            company=(r.get("公司主体") or "").strip(),
+            sales_company=(r.get("销售公司") or "").strip(),
+            seller=(r.get("销售姓名") or "").strip(),
+            customer=(r.get("客户姓名") or "").strip(),
+            phone=(r.get("客户电话") or "").strip(),
+            typ=(r.get("类型") or "").strip(),
+            amount=to_int(r.get("金额")),
+            total_price=to_int(r.get("产品总价")),
+            note=(r.get("备注") or "").strip(),
         )
+
+        if not tx.company or not tx.seller or not tx.customer or not tx.typ:
+            continue
+
+        txs.append(tx)
+
     return txs
 
 
-# ══════════════════════════════════════════
-# 原始CSV Sheet（保持可追溯）
-# ══════════════════════════════════════════
-
-def sheet_from_csv(wb, sheet_name, csv_file, widths=None, highlight=None):
-    """把CSV原样放到Sheet
-    highlight: dict: {"col_name": "退款状态", "rules": {"已退款": RED_FONT, ...}}
-    """
-    ws = wb.create_sheet(sheet_name)
+def ws_from_rows(wb, name, headers, rows, widths=None, highlight=None):
+    ws = wb.create_sheet(name)
     ws.sheet_view.showGridLines = False
 
-    rows = read_csv_rows(csv_file)
-    if not rows:
-        return
-
-    headers = list(rows[0].keys())
     ws.row_dimensions[1].height = 28
     for i, h in enumerate(headers, 1):
         ws.cell(row=1, column=i, value=h)
     set_header_row(ws, 1, len(headers))
 
-    # find highlight col
-    hl_idx = None
-    hl_rules = {}
-    if highlight:
-        col_name = highlight.get("col_name")
-        hl_rules = highlight.get("rules") or {}
-        if col_name in headers:
-            hl_idx = headers.index(col_name) + 1
+    hl_col = None
+    rules = {}
+    if highlight and highlight.get("col") in headers:
+        hl_col = headers.index(highlight["col"]) + 1
+        rules = highlight.get("rules") or {}
 
     for r_i, row in enumerate(rows, 2):
         ws.row_dimensions[r_i].height = 20
-        for c_i, h in enumerate(headers, 1):
-            v = row.get(h, "")
-            # 数值列尽量转数字
-            if h in ("金额", "报名费", "尾款", "全款", "退款", "实收业绩", "净业绩", "退款金额", "尾款金额", "成交客户数"):
-                try:
-                    v = int(float(v)) if str(v).strip() != "" else v
-                except Exception:
-                    pass
-            ws.cell(row=r_i, column=c_i, value=v)
-        fill = SUB_FILL if r_i % 2 == 0 else None
-        style_row(ws, r_i, len(headers), fill)
+        for c_i, val in enumerate(row, 1):
+            ws.cell(row=r_i, column=c_i, value=val)
+        style_row(ws, r_i, len(headers), SUB_FILL if r_i % 2 == 0 else None)
 
-        if hl_idx:
-            val = ws.cell(row=r_i, column=hl_idx).value
-            if val in hl_rules:
-                ws.cell(row=r_i, column=hl_idx).font = hl_rules[val]
+        if hl_col:
+            v = ws.cell(row=r_i, column=hl_col).value
+            if v in rules:
+                ws.cell(row=r_i, column=hl_col).font = rules[v]
 
     if widths:
-        col_width(ws, widths)
+        set_col_width(ws, widths)
     else:
         for i in range(1, len(headers) + 1):
             ws.column_dimensions[get_column_letter(i)].width = 14
 
+    return ws
 
-# ══════════════════════════════════════════
-# 查询分析 Sheet（满足你的7条需求）
-# ══════════════════════════════════════════
 
-def build_query_sheet(wb, txs):
+def build_raw_sheet(wb, txs: list[Tx]):
+    headers = [
+        "业务日期",
+        "公司主体",
+        "销售公司",
+        "销售姓名",
+        "客户姓名",
+        "客户电话",
+        "客户进线日期",
+        "类型",
+        "金额",
+        "产品总价",
+        "备注",
+    ]
+
+    rows = []
+    for t in txs:
+        rows.append(
+            [
+                t.biz_date.isoformat(),
+                t.company,
+                t.sales_company,
+                t.seller,
+                t.customer,
+                t.phone,
+                t.lead_date.isoformat() if t.lead_date else "",
+                t.typ,
+                t.amount,
+                t.total_price if t.total_price else "",
+                t.note,
+            ]
+        )
+
+    ws_from_rows(
+        wb,
+        "业绩流水表",
+        headers,
+        rows,
+        widths=[12, 10, 12, 10, 10, 14, 14, 10, 10, 10, 18],
+    )
+
+
+def build_order_summary(txs: list[Tx]):
+    agg = defaultdict(
+        lambda: {
+            "company": "",
+            "sales_company": "",
+            "seller": "",
+            "customer": "",
+            "phone": "",
+            "lead_date": None,
+            "total_price": 0,
+            "signup": 0,
+            "tail": 0,
+            "full": 0,
+            "refund": 0,
+        }
+    )
+
+    for t in txs:
+        a = agg[t.order_key]
+        a["company"] = a["company"] or t.company
+        a["sales_company"] = a["sales_company"] or t.sales_company
+        a["seller"] = a["seller"] or t.seller
+        a["customer"] = a["customer"] or t.customer
+        a["phone"] = a["phone"] or t.phone
+        a["lead_date"] = a["lead_date"] or t.lead_date
+
+        if t.total_price:
+            a["total_price"] = max(a["total_price"], t.total_price)
+
+        if t.typ == "报名费":
+            a["signup"] += t.amount
+        elif t.typ == "尾款":
+            a["tail"] += t.amount
+        elif t.typ == "全款":
+            a["full"] += t.amount
+            if not a["total_price"]:
+                a["total_price"] = max(a["total_price"], t.amount)
+        elif t.typ == "退款":
+            a["refund"] += t.amount
+
+    rows = []
+    for _, a in agg.items():
+        total_price = a["total_price"]
+        receivable_tail = total_price - SIGNUP_FEE if total_price else 0
+
+        received_tail = a["tail"]
+        if a["full"] > 0:
+            received_tail = max(received_tail, a["full"] - SIGNUP_FEE)
+
+        if total_price and receivable_tail > 0 and (a["tail"] > 0 or a["full"] > 0):
+            tail_rate_disp = f"{(received_tail / receivable_tail):.1%}"
+        else:
+            tail_rate_disp = "--"
+
+        unpaid_tail = receivable_tail - received_tail if total_price else 0
+
+        gross = a["signup"] + a["tail"] + a["full"]
+        net = gross + a["refund"]
+
+        refund_status = "未退款"
+        if a["refund"] < 0 and net <= 0:
+            refund_status = "已退款"
+        elif a["refund"] < 0 and net > 0:
+            refund_status = "部分退款"
+
+        rows.append(
+            [
+                a["company"],
+                a["sales_company"],
+                a["seller"],
+                a["customer"],
+                a["phone"],
+                a["lead_date"].isoformat() if a["lead_date"] else "",
+                total_price if total_price else "",
+                SIGNUP_FEE if total_price else "",
+                receivable_tail if total_price else "",
+                received_tail if total_price else "",
+                unpaid_tail if total_price else "",
+                tail_rate_disp,
+                a["signup"],
+                a["tail"],
+                a["full"],
+                a["refund"],
+                gross,
+                net,
+                refund_status,
+            ]
+        )
+
+    rows.sort(key=lambda r: (r[0], r[2], r[3]))
+
+    headers = [
+        "公司主体",
+        "销售公司",
+        "销售",
+        "客户",
+        "电话",
+        "进线日期",
+        "产品总价",
+        "报名费(固定)",
+        "应收尾款",
+        "已收尾款",
+        "未收尾款",
+        "尾款回收率",
+        "报名费",
+        "尾款",
+        "全款",
+        "退款",
+        "实收业绩",
+        "净业绩",
+        "退款状态",
+    ]
+
+    return headers, rows
+
+
+def build_seller_summary(order_rows):
+    agg = defaultdict(lambda: {"company": set(), "sales_company": set(), "customers": 0, "gross": 0, "net": 0, "refund_abs": 0,
+                               "rec_tail": 0, "got_tail": 0, "un_tail": 0, "tail_num": 0, "tail_den": 0,
+                               "full_customers": 0, "signup_customers": 0, "signup_no_tail": 0})
+
+    for r in order_rows:
+        seller = r[2]
+        a = agg[seller]
+        a["company"].add(r[0])
+        if r[1]:
+            a["sales_company"].add(r[1])
+        a["customers"] += 1
+
+        gross = r[16] if isinstance(r[16], int) else 0
+        net = r[17] if isinstance(r[17], int) else 0
+        refund = r[15] if isinstance(r[15], int) else 0
+
+        a["gross"] += gross
+        a["net"] += net
+        a["refund_abs"] += abs(refund) if refund < 0 else 0
+
+        rec_tail = r[8] if isinstance(r[8], int) else 0
+        got_tail = r[9] if isinstance(r[9], int) else 0
+        un_tail = r[10] if isinstance(r[10], int) else 0
+        a["rec_tail"] += rec_tail
+        a["got_tail"] += got_tail
+        a["un_tail"] += un_tail
+        if rec_tail > 0:
+            a["tail_den"] += rec_tail
+            a["tail_num"] += got_tail
+
+        full_amt = r[14] if isinstance(r[14], int) else 0
+        signup_amt = r[12] if isinstance(r[12], int) else 0
+        tail_amt = r[13] if isinstance(r[13], int) else 0
+        if full_amt > 0:
+            a["full_customers"] += 1
+        if signup_amt > 0:
+            a["signup_customers"] += 1
+            if tail_amt == 0 and full_amt == 0:
+                a["signup_no_tail"] += 1
+
+    headers = [
+        "销售",
+        "公司主体(集合)",
+        "销售公司(集合)",
+        "客户数",
+        "全款客户数",
+        "报名费客户数",
+        "报名费无尾款客户数",
+        "实收业绩",
+        "净业绩",
+        "退款金额",
+        "退款率",
+        "应收尾款",
+        "已收尾款",
+        "未收尾款",
+        "尾款回收率",
+        "排名(按净业绩)",
+    ]
+
+    rows = []
+    for seller, a in agg.items():
+        refund_rate = a["refund_abs"] / a["gross"] if a["gross"] else 0
+        tail_rate = a["tail_num"] / a["tail_den"] if a["tail_den"] else None
+        rows.append(
+            [
+                seller,
+                ",".join(sorted(a["company"])),
+                ",".join(sorted(a["sales_company"])) if a["sales_company"] else "",
+                a["customers"],
+                a["full_customers"],
+                a["signup_customers"],
+                a["signup_no_tail"],
+                a["gross"],
+                a["net"],
+                -a["refund_abs"],
+                f"{refund_rate:.1%}",
+                a["rec_tail"],
+                a["got_tail"],
+                a["un_tail"],
+                f"{tail_rate:.1%}" if tail_rate is not None else "--",
+                0,
+            ]
+        )
+
+    rows.sort(key=lambda r: r[8], reverse=True)
+    for i, r in enumerate(rows, 1):
+        r[-1] = i
+
+    return headers, rows
+
+
+def build_group_summary(order_rows, key_index, key_name):
+    agg = defaultdict(lambda: {"orders": 0, "gross": 0, "net": 0, "refund_abs": 0, "rec_tail": 0, "got_tail": 0, "un_tail": 0})
+
+    for r in order_rows:
+        k = r[key_index] or "(空)"
+        a = agg[k]
+        a["orders"] += 1
+        a["gross"] += r[16] if isinstance(r[16], int) else 0
+        a["net"] += r[17] if isinstance(r[17], int) else 0
+        refund = r[15] if isinstance(r[15], int) else 0
+        a["refund_abs"] += abs(refund) if refund < 0 else 0
+        a["rec_tail"] += r[8] if isinstance(r[8], int) else 0
+        a["got_tail"] += r[9] if isinstance(r[9], int) else 0
+        a["un_tail"] += r[10] if isinstance(r[10], int) else 0
+
+    rows = []
+    for k, a in agg.items():
+        refund_rate = a["refund_abs"] / a["gross"] if a["gross"] else 0
+        tail_rate = a["got_tail"] / a["rec_tail"] if a["rec_tail"] else None
+        rows.append(
+            [
+                k,
+                a["orders"],
+                a["gross"],
+                a["net"],
+                -a["refund_abs"],
+                f"{refund_rate:.1%}",
+                a["rec_tail"],
+                a["got_tail"],
+                a["un_tail"],
+                f"{tail_rate:.1%}" if tail_rate is not None else "--",
+            ]
+        )
+
+    rows.sort(key=lambda r: r[3], reverse=True)
+    headers = [key_name, "订单数", "实收业绩", "净业绩", "退款金额", "退款率", "应收尾款", "已收尾款", "未收尾款", "尾款回收率"]
+    return headers, rows
+
+
+def build_company_time_summary(txs: list[Tx]):
+    day = defaultdict(lambda: {"gross": 0, "net": 0})
+    week = defaultdict(lambda: {"gross": 0, "net": 0})
+    month = defaultdict(lambda: {"gross": 0, "net": 0})
+
+    for t in txs:
+        dkey = (t.biz_date.isoformat(), t.company)
+        wkey = (week_start(t.biz_date).isoformat(), t.company)
+        mkey = (month_key(t.biz_date), t.company)
+
+        if t.typ != "退款":
+            day[dkey]["gross"] += t.amount
+            week[wkey]["gross"] += t.amount
+            month[mkey]["gross"] += t.amount
+        day[dkey]["net"] += t.amount
+        week[wkey]["net"] += t.amount
+        month[mkey]["net"] += t.amount
+
+    def rows_from(m):
+        rows = []
+        for (k, company), v in m.items():
+            rows.append([k, company, v["gross"], v["net"]])
+        rows.sort(key=lambda r: (r[0], r[1]))
+        return rows
+
+    return (
+        ("按日", rows_from(day)),
+        ("按周(周一)", rows_from(week)),
+        ("按月", rows_from(month)),
+    )
+
+
+def build_query_sheet(wb, txs: list[Tx], order_rows):
     ws = wb.create_sheet("查询分析")
     ws.sheet_view.showGridLines = False
 
-    # 标题
-    ws.merge_cells("A1:N1")
-    ws["A1"] = "🔎 查询分析（自动汇总自 业绩流水表）"
+    ws.merge_cells("A1:O1")
+    ws["A1"] = "🔎 查询分析（通用模板版）"
     ws["A1"].fill = KPI_FILL
     ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
     ws["A1"].alignment = CENTER
     ws.row_dimensions[1].height = 34
 
-    # 参数区
-    ws["A3"] = "参数"; ws["A3"].font = DARK_BOLD
-    ws["A4"] = "查询日期（业务日期）"; ws["B4"] = "2026/5/19"
-    ws["A5"] = "查询销售姓名"; ws["B5"] = "王"
-    ws["A6"] = "查询周期（week 或 month）"; ws["B6"] = "month"
-    ws["A7"] = "查询周期起始日（week使用）"; ws["B7"] = "2026/5/18"
-    for r in range(4, 8):
-        ws[f"A{r}"].alignment = LEFT
-        ws[f"B{r}"].alignment = LEFT
-
-    ws["D3"] = "说明"; ws["D3"].font = DARK_BOLD
-    ws["D4"] = "修改B列参数即可刷新筛选（本脚本生成的是结果快照）"
-    ws.merge_cells("D4:N4")
-
-    # 1）每天每个公司主体总业绩
-    ws["A9"] = "1）每天每个公司主体总业绩（实收/净业绩）"; ws["A9"].font = DARK_BOLD
-    daily_company = defaultdict(lambda: {"gross": 0, "net": 0})
-    for t in txs:
-        key = (t["biz_date"].isoformat(), t["company"])
-        # gross: 非退款
-        if t["type"] != "退款":
-            daily_company[key]["gross"] += t["amount"]
-        daily_company[key]["net"] += t["amount"]
-
-    table1 = [(d, c, v["gross"], v["net"]) for (d, c), v in daily_company.items()]
-    table1.sort(key=lambda x: (x[0], x[1]))
-
-    start_row = 10
+    r = 3
+    ws[f"A{r}"] = "1）每天每个公司主体总业绩（实收/净）"; ws[f"A{r}"].font = DARK_BOLD
+    r += 1
     headers = ["日期", "公司主体", "实收业绩", "净业绩"]
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=start_row, column=i, value=h)
-    set_header_row(ws, start_row, len(headers))
+    rows = build_company_time_summary(txs)[0][1]
 
-    r = start_row + 1
-    for d, c, gross, net in table1:
-        ws.cell(row=r, column=1, value=d)
-        ws.cell(row=r, column=2, value=c)
-        ws.cell(row=r, column=3, value=gross)
-        ws.cell(row=r, column=4, value=net)
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=r, column=i, value=h)
+    set_header_row(ws, r, len(headers))
+    r += 1
+    for row in rows:
+        for i, v in enumerate(row, 1):
+            ws.cell(row=r, column=i, value=v)
         style_row(ws, r, len(headers), SUB_FILL if r % 2 == 0 else None)
         r += 1
 
-    after_table1 = r + 1
-
-    # 2）某日进线数据业绩查询（按进线日期=某日；统计其后产生的业绩）
-    ws.cell(row=after_table1, column=1, value="2）某日进线数据业绩查询（按客户进线日期）").font = DARK_BOLD
-    ws.cell(row=after_table1 + 1, column=1, value="默认查询：2026/5/19 进线客户")
-
-    target_lead = dt.date(2026, 5, 19)
-    lead_customers = {t["customer"] for t in txs if t["lead_date"] == target_lead}
-
-    lead_tx = [t for t in txs if t["customer"] in lead_customers]
-    # 输出明细
-    hdr = ["客户", "销售", "公司主体", "进线日期", "业务日期", "类型", "金额"]
-    sr = after_table1 + 3
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=sr, column=i, value=h)
-    set_header_row(ws, sr, len(hdr))
-    rr = sr + 1
-    for t in sorted(lead_tx, key=lambda x: (x["customer"], x["biz_date"])):
-        ws.cell(row=rr, column=1, value=t["customer"])
-        ws.cell(row=rr, column=2, value=t["seller"])
-        ws.cell(row=rr, column=3, value=t["company"])
-        ws.cell(row=rr, column=4, value=t["lead_date"].isoformat() if t["lead_date"] else "")
-        ws.cell(row=rr, column=5, value=t["biz_date"].isoformat())
-        ws.cell(row=rr, column=6, value=t["type"])
-        ws.cell(row=rr, column=7, value=t["amount"])
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        if t["type"] == "退款":
-            ws.cell(row=rr, column=7).font = RED_FONT
-        rr += 1
-
-    after_table2 = rr + 1
-
-    # 3）某个销售业绩查询（按销售姓名汇总）
-    ws.cell(row=after_table2, column=1, value="3）某个销售业绩查询（按销售汇总）").font = DARK_BOLD
-    seller_sum = defaultdict(lambda: {"gross": 0, "net": 0, "refund": 0})
+    r += 2
+    ws[f"A{r}"] = "4）全款客户查询（从流水筛选类型=全款）"; ws[f"A{r}"].font = DARK_BOLD
+    r += 1
+    headers = ["客户", "销售", "销售公司", "公司主体", "全款金额", "业务日期"]
+    full_rows = []
     for t in txs:
-        if t["type"] != "退款":
-            seller_sum[t["seller"]]["gross"] += t["amount"]
-        else:
-            seller_sum[t["seller"]]["refund"] += abs(t["amount"])
-        seller_sum[t["seller"]]["net"] += t["amount"]
+        if t.typ == "全款" and t.amount > 0:
+            full_rows.append([t.customer, t.seller, t.sales_company, t.company, t.amount, t.biz_date.isoformat()])
+    full_rows.sort(key=lambda x: (x[5], x[1], x[0]))
 
-    hdr = ["销售", "实收业绩", "净业绩", "退款金额", "退款率"]
-    sr = after_table2 + 1
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=sr, column=i, value=h)
-    set_header_row(ws, sr, len(hdr))
-
-    rr = sr + 1
-    for seller, v in sorted(seller_sum.items(), key=lambda x: x[1]["net"], reverse=True):
-        gross, net, refund = v["gross"], v["net"], v["refund"]
-        refund_rate = (refund / gross) if gross else 0
-        ws.cell(row=rr, column=1, value=seller)
-        ws.cell(row=rr, column=2, value=gross)
-        ws.cell(row=rr, column=3, value=net)
-        ws.cell(row=rr, column=4, value=refund)
-        ws.cell(row=rr, column=5, value=f"{refund_rate:.1%}")
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        # 着色
-        if refund_rate > 0.5:
-            ws.cell(row=rr, column=5).font = RED_FONT
-        elif refund_rate > 0.2:
-            ws.cell(row=rr, column=5).font = ORANGE_FONT
-        else:
-            ws.cell(row=rr, column=5).font = GREEN_FONT
-        rr += 1
-
-    after_table3 = rr + 1
-
-    # 4）全款客户查询（全款>0）
-    ws.cell(row=after_table3, column=1, value="4）全款客户查询（全款金额>0）").font = DARK_BOLD
-    # 基于流水：type==全款
-    fullpay = [t for t in txs if t["type"] == "全款" and t["amount"] > 0]
-    hdr = ["客户", "销售", "公司主体", "业务日期", "全款金额"]
-    sr = after_table3 + 1
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=sr, column=i, value=h)
-    set_header_row(ws, sr, len(hdr))
-    rr = sr + 1
-    for t in sorted(fullpay, key=lambda x: (x["biz_date"], x["seller"])):
-        ws.cell(row=rr, column=1, value=t["customer"])
-        ws.cell(row=rr, column=2, value=t["seller"])
-        ws.cell(row=rr, column=3, value=t["company"])
-        ws.cell(row=rr, column=4, value=t["biz_date"].isoformat())
-        ws.cell(row=rr, column=5, value=t["amount"])
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        rr += 1
-
-    after_table4 = rr + 1
-
-    # 5）报名费客户查询（无尾款：有报名费且无尾款）
-    ws.cell(row=after_table4, column=1, value="5）报名费客户查询（无尾款：有报名费且无尾款）").font = DARK_BOLD
-    # per customer aggregate
-    cust = defaultdict(lambda: {"signup": 0, "tail": 0, "full": 0, "refund": 0, "company": "", "seller": "", "lead": None})
-    for t in txs:
-        c = cust[t["customer"]]
-        c["company"] = c["company"] or t["company"]
-        c["seller"] = c["seller"] or t["seller"]
-        c["lead"] = c["lead"] or t["lead_date"]
-        if t["type"] == "报名费":
-            c["signup"] += t["amount"]
-        elif t["type"] == "尾款":
-            c["tail"] += t["amount"]
-        elif t["type"] == "全款":
-            c["full"] += t["amount"]
-        elif t["type"] == "退款":
-            c["refund"] += t["amount"]
-
-    signup_no_tail = [
-        (name, v["seller"], v["company"], v["signup"], v["tail"], v["full"], v["refund"])
-        for name, v in cust.items()
-        if v["signup"] > 0 and v["tail"] == 0
-    ]
-
-    hdr = ["客户", "销售", "公司主体", "报名费", "尾款", "全款", "退款"]
-    sr = after_table4 + 1
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=sr, column=i, value=h)
-    set_header_row(ws, sr, len(hdr))
-
-    rr = sr + 1
-    for row in sorted(signup_no_tail, key=lambda x: (x[2], x[1], x[0])):
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=r, column=i, value=h)
+    set_header_row(ws, r, len(headers))
+    r += 1
+    for row in full_rows[:200]:
         for i, v in enumerate(row, 1):
-            ws.cell(row=rr, column=i, value=v)
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        rr += 1
+            ws.cell(row=r, column=i, value=v)
+        style_row(ws, r, len(headers), SUB_FILL if r % 2 == 0 else None)
+        r += 1
 
-    after_table5 = rr + 1
+    r += 2
+    ws[f"A{r}"] = "5）报名费客户（无尾款/无全款）"; ws[f"A{r}"].font = DARK_BOLD
+    r += 1
+    headers = ["客户", "销售", "销售公司", "公司主体", "报名费", "尾款", "全款", "尾款回收率"]
 
-    # 6 & 7）周/月销售公司业绩/个人业绩（含去退款）
-    ws.cell(row=after_table5, column=1, value="6）周/月销售业绩汇总（个人） & 7）去退款净业绩").font = DARK_BOLD
+    no_tail = []
+    for row in order_rows:
+        signup, tail, full = row[12], row[13], row[14]
+        if isinstance(signup, int) and signup > 0 and (not isinstance(tail, int) or tail == 0) and (not isinstance(full, int) or full == 0):
+            no_tail.append([row[3], row[2], row[1], row[0], signup, tail if isinstance(tail, int) else 0, full if isinstance(full, int) else 0, row[11]])
+    no_tail.sort(key=lambda x: (x[3], x[1], x[0]))
 
-    # month per seller
-    seller_month = defaultdict(lambda: {"gross": 0, "net": 0, "refund": 0})
-    seller_week = defaultdict(lambda: {"gross": 0, "net": 0, "refund": 0})
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=r, column=i, value=h)
+    set_header_row(ws, r, len(headers))
+    r += 1
+    for row in no_tail[:200]:
+        for i, v in enumerate(row, 1):
+            ws.cell(row=r, column=i, value=v)
+        style_row(ws, r, len(headers), SUB_FILL if r % 2 == 0 else None)
+        r += 1
 
-    for t in txs:
-        mk = month_key(t["biz_date"])
-        wk = week_start(t["biz_date"]).isoformat()
-
-        if t["type"] != "退款":
-            seller_month[(mk, t["seller"])]["gross"] += t["amount"]
-            seller_week[(wk, t["seller"])]["gross"] += t["amount"]
-        else:
-            seller_month[(mk, t["seller"])]["refund"] += abs(t["amount"])
-            seller_week[(wk, t["seller"])]["refund"] += abs(t["amount"])
-
-        seller_month[(mk, t["seller"])]["net"] += t["amount"]
-        seller_week[(wk, t["seller"])]["net"] += t["amount"]
-
-    # 输出月汇总
-    ws.cell(row=after_table5 + 1, column=1, value="月汇总（个人）")
-    hdr = ["月份", "销售", "实收业绩", "净业绩(去退款)", "退款金额", "退款率"]
-    sr = after_table5 + 2
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=sr, column=i, value=h)
-    set_header_row(ws, sr, len(hdr))
-
-    rr = sr + 1
-    for (mk, seller), v in sorted(seller_month.items(), key=lambda x: (x[0][0], -x[1]["net"])):
-        gross, net, refund = v["gross"], v["net"], v["refund"]
-        rate = refund / gross if gross else 0
-        ws.cell(row=rr, column=1, value=mk)
-        ws.cell(row=rr, column=2, value=seller)
-        ws.cell(row=rr, column=3, value=gross)
-        ws.cell(row=rr, column=4, value=net)
-        ws.cell(row=rr, column=5, value=refund)
-        ws.cell(row=rr, column=6, value=f"{rate:.1%}")
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        rr += 1
-
-    # 输出周汇总
-    rr += 1
-    ws.cell(row=rr, column=1, value="周汇总（个人，周起始日=周一）")
-    rr += 1
-    for i, h in enumerate(hdr, 1):
-        ws.cell(row=rr, column=i, value=h)
-    set_header_row(ws, rr, len(hdr))
-
-    rr += 1
-    for (wk, seller), v in sorted(seller_week.items(), key=lambda x: (x[0][0], -x[1]["net"])):
-        gross, net, refund = v["gross"], v["net"], v["refund"]
-        rate = refund / gross if gross else 0
-        ws.cell(row=rr, column=1, value=wk)
-        ws.cell(row=rr, column=2, value=seller)
-        ws.cell(row=rr, column=3, value=gross)
-        ws.cell(row=rr, column=4, value=net)
-        ws.cell(row=rr, column=5, value=refund)
-        ws.cell(row=rr, column=6, value=f"{rate:.1%}")
-        style_row(ws, rr, len(hdr), SUB_FILL if rr % 2 == 0 else None)
-        rr += 1
-
-    # 列宽
-    for i in range(1, 15):
+    for i in range(1, 16):
         ws.column_dimensions[get_column_letter(i)].width = 16
 
 
-# ══════════════════════════════════════════
-# 图表分析（基于 txs 动态计算）
-# ══════════════════════════════════════════
-
-def build_charts(wb, txs):
+def build_charts(wb, seller_rows):
     ws = wb.create_sheet("图表分析")
     ws.sheet_view.showGridLines = False
 
     ws.merge_cells("A1:P1")
-    ws["A1"] = "📈 业绩图表分析（自动生成）"
-    ws["A1"].fill = PatternFill("solid", fgColor="001529")
+    ws["A1"] = "📈 图表分析（基于销售汇总自动生成）"
+    ws["A1"].fill = KPI_FILL
     ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
     ws["A1"].alignment = CENTER
     ws.row_dimensions[1].height = 36
 
-    # 计算：按销售汇总
-    seller_sum = defaultdict(lambda: {"gross": 0, "net": 0, "refund_abs": 0})
-    for t in txs:
-        if t["type"] != "退款":
-            seller_sum[t["seller"]]["gross"] += t["amount"]
-        else:
-            seller_sum[t["seller"]]["refund_abs"] += abs(t["amount"])
-        seller_sum[t["seller"]]["net"] += t["amount"]
-
-    sellers = [s for s, _ in sorted(seller_sum.items(), key=lambda x: x[1]["net"], reverse=True)]
-
-    # 付款结构
-    pay = {"全款": 0, "报名费": 0, "尾款": 0}
-    for t in txs:
-        if t["type"] in pay and t["amount"] > 0:
-            pay[t["type"]] += t["amount"]
-
-    # 写数据源（隐藏在 S 列以后）
     base_col = 19  # S
     ws.cell(row=2, column=base_col, value="销售")
     ws.cell(row=2, column=base_col + 1, value="实收业绩")
     ws.cell(row=2, column=base_col + 2, value="净业绩")
     ws.cell(row=2, column=base_col + 3, value="退款金额")
 
-    for i, s in enumerate(sellers, 3):
-        ws.cell(row=i, column=base_col, value=s)
-        ws.cell(row=i, column=base_col + 1, value=seller_sum[s]["gross"])
-        ws.cell(row=i, column=base_col + 2, value=seller_sum[s]["net"])
-        ws.cell(row=i, column=base_col + 3, value=seller_sum[s]["refund_abs"])
+    for i, r in enumerate(seller_rows, 3):
+        ws.cell(row=i, column=base_col, value=r[0])
+        ws.cell(row=i, column=base_col + 1, value=r[7])
+        ws.cell(row=i, column=base_col + 2, value=r[8])
+        ws.cell(row=i, column=base_col + 3, value=r[9])
 
-    # 饼图数据
-    ws.cell(row=3, column=base_col + 5, value="类型")
-    ws.cell(row=3, column=base_col + 6, value="金额")
-    for idx, k in enumerate(["全款", "报名费", "尾款"], 4):
-        ws.cell(row=idx, column=base_col + 5, value=k)
-        ws.cell(row=idx, column=base_col + 6, value=pay[k])
+    max_row = 2 + len(seller_rows)
 
-    max_row = 2 + len(sellers)
+    c1 = BarChart()
+    c1.type = "col"
+    c1.title = "销售实收业绩 vs 净业绩"
+    c1.y_axis.title = "金额"
+    c1.x_axis.title = "销售"
+    c1.width = 22
+    c1.height = 12
 
-    # 图表1：销售实收 vs 净业绩
-    chart1 = BarChart()
-    chart1.type = "col"
-    chart1.title = "销售实收业绩 vs 净业绩对比"
-    chart1.y_axis.title = "金额（元）"
-    chart1.x_axis.title = "销售"
-    chart1.style = 10
-    chart1.width = 20
-    chart1.height = 13
+    cats = Reference(ws, min_col=base_col, min_row=3, max_row=max_row)
+    data = Reference(ws, min_col=base_col + 1, max_col=base_col + 2, min_row=2, max_row=max_row)
+    c1.add_data(data, titles_from_data=True)
+    c1.set_categories(cats)
+    c1.series[0].graphicalProperties.solidFill = "1890FF"
+    c1.series[1].graphicalProperties.solidFill = "52C41A"
+    ws.add_chart(c1, "A3")
 
-    cats1 = Reference(ws, min_col=base_col, min_row=3, max_row=max_row)
-    data1 = Reference(ws, min_col=base_col + 1, max_col=base_col + 2, min_row=2, max_row=max_row)
-    chart1.add_data(data1, titles_from_data=True)
-    chart1.set_categories(cats1)
-    chart1.series[0].graphicalProperties.solidFill = "1890FF"
-    chart1.series[1].graphicalProperties.solidFill = "52C41A"
-    ws.add_chart(chart1, "A3")
+    c2 = BarChart()
+    c2.type = "col"
+    c2.title = "销售退款金额"
+    c2.y_axis.title = "金额"
+    c2.x_axis.title = "销售"
+    c2.width = 22
+    c2.height = 12
 
-    # 图表2：退款金额
-    chart2 = BarChart()
-    chart2.type = "col"
-    chart2.title = "销售退款金额对比"
-    chart2.y_axis.title = "退款金额（元）"
-    chart2.x_axis.title = "销售"
-    chart2.style = 10
-    chart2.width = 20
-    chart2.height = 13
-
-    cats2 = Reference(ws, min_col=base_col, min_row=3, max_row=max_row)
     data2 = Reference(ws, min_col=base_col + 3, min_row=2, max_row=max_row)
-    chart2.add_data(data2, titles_from_data=True)
-    chart2.set_categories(cats2)
-    chart2.series[0].graphicalProperties.solidFill = "FF4D4F"
-    ws.add_chart(chart2, "K3")
-
-    # 图表3：付款结构饼图
-    chart3 = PieChart()
-    chart3.title = "付款结构占比（全款/报名费/尾款）"
-    chart3.style = 10
-    chart3.width = 20
-    chart3.height = 13
-
-    pie_labels = Reference(ws, min_col=base_col + 5, min_row=4, max_row=6)
-    pie_data = Reference(ws, min_col=base_col + 6, min_row=3, max_row=6)
-    chart3.add_data(pie_data, titles_from_data=True)
-    chart3.set_categories(pie_labels)
-    for i, color in enumerate(["1890FF", "52C41A", "FA8C16"]):
-        pt = DataPoint(idx=i)
-        pt.graphicalProperties.solidFill = color
-        chart3.series[0].dPt.append(pt)
-    ws.add_chart(chart3, "A22")
+    c2.add_data(data2, titles_from_data=True)
+    c2.set_categories(cats)
+    c2.series[0].graphicalProperties.solidFill = "FF4D4F"
+    ws.add_chart(c2, "A20")
 
     for i in range(1, 17):
         ws.column_dimensions[get_column_letter(i)].width = 13
 
 
-# ══════════════════════════════════════════
-# 主函数
-# ══════════════════════════════════════════
-
 def main():
-    txs = load_transactions()
+    txs = load_txs_from_sheet1()
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    # 1）原始&汇总Sheet（保留）
-    sheet_from_csv(
-        wb,
-        "业绩流水表",
-        "sheet1-业绩流水表.csv",
-        widths=[14, 10, 10, 8, 14, 14, 10, 12, 16],
-    )
-    sheet_from_csv(
+    build_raw_sheet(wb, txs)
+
+    order_headers, order_rows = build_order_summary(txs)
+    ws_from_rows(
         wb,
         "客户订单汇总表",
-        "sheet2-客户订单汇总表.csv",
-        widths=[14, 10, 10, 8, 14, 14, 10, 10, 10, 10, 12, 12, 12, 16, 12, 20],
+        order_headers,
+        order_rows,
+        widths=[10, 12, 8, 10, 14, 12, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
         highlight={
-            "col_name": "退款状态",
+            "col": "退款状态",
             "rules": {"已退款": RED_FONT, "部分退款": ORANGE_FONT, "未退款": GREEN_FONT},
         },
     )
-    sheet_from_csv(
+
+    seller_headers, seller_rows = build_seller_summary(order_rows)
+    ws_from_rows(
         wb,
         "销售业绩汇总表",
-        "sheet3-销售业绩汇总表.csv",
-        widths=[12, 10, 10, 12, 14, 12, 16, 16, 12, 12, 12, 12, 10, 10, 10, 8],
-    )
-    sheet_from_csv(
-        wb,
-        "公司业绩汇总表",
-        "sheet4-公司业绩汇总表.csv",
-        widths=[12, 10, 12, 12, 12, 12, 12, 10, 12, 10, 14, 12, 12],
+        seller_headers,
+        seller_rows,
+        widths=[10, 18, 18, 10, 12, 12, 16, 12, 12, 10, 10, 10, 10, 10, 10, 10],
     )
 
-    # 2）新增：查询分析
-    build_query_sheet(wb, txs)
+    sc_headers, sc_rows = build_group_summary(order_rows, key_index=1, key_name="销售公司")
+    ws_from_rows(wb, "销售公司业绩汇总表", sc_headers, sc_rows)
 
-    # 3）图表分析（动态）
-    build_charts(wb, txs)
+    c_headers, c_rows = build_group_summary(order_rows, key_index=0, key_name="公司主体")
+    ws_from_rows(wb, "公司主体业绩汇总表", c_headers, c_rows)
 
-    # 4）老板看板：沿用原来的（你当前 repo 里有 md 汇总，但 excel 看板后续可再进一步布局）
-    # 这里先用查询分析 + 图表分析替代看板核心诉求。若你需要KPI卡片版，我也可以继续加。
+    build_query_sheet(wb, txs, order_rows)
+    build_charts(wb, seller_rows)
 
-    filename = "电商业绩分析老板看板_5月.xlsx"
-    wb.save(filename)
-
-    print(f"✅ 已生成：{filename}")
-    print("📌 Sheet 包含：业绩流水表 / 客户订单汇总表 / 销售业绩汇总表 / 公司业绩汇总表 / 查询分析 / 图表分析")
+    wb.save(OUTPUT_FILE)
+    print(f"✅ 已生成：{OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
