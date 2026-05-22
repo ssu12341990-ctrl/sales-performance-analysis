@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - 多Sheet版 v6.0
+"""电商业绩分析老板看板 - 正式版仪表盘 v7.0
 
-目标：
-- 把 data/ 里的数据整理到同一个 Excel 文件中
-- 每个分析表单独一个 Sheet
-- 新增首页「老板看板」，展示核心 KPI 和汇总图表
+功能：
+- 将原始流水、客户订单汇总、销售汇总、销售公司汇总、公司主体汇总放到同一个 Excel
+- 首页为老板看板，打开即可查看 KPI、排行榜、趋势图、结构图、风险提示
+- 自动从 data/sheet1-业绩流水表.csv 读取数据并汇总
 
 输出文件：电商业绩分析老板看板.xlsx
 依赖：pip install openpyxl
@@ -19,19 +19,24 @@ from collections import defaultdict
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart import BarChart, PieChart, LineChart, Reference
 from openpyxl.chart.series import DataPoint
 
 SIGNUP_FEE = 1800
 OUTPUT_FILE = "电商业绩分析老板看板.xlsx"
 
 HEADER_FILL = PatternFill("solid", fgColor="1890FF")
-SUB_FILL = PatternFill("solid", fgColor="E6F0FF")
-TITLE_FILL = PatternFill("solid", fgColor="001529")
-KPI_FILL = PatternFill("solid", fgColor="0D2137")
+SUB_FILL = PatternFill("solid", fgColor="F5FAFF")
+TITLE_FILL = PatternFill("solid", fgColor="0B1F33")
+CARD_BLUE = PatternFill("solid", fgColor="1677FF")
+CARD_DARK = PatternFill("solid", fgColor="102A43")
+CARD_GREEN = PatternFill("solid", fgColor="52C41A")
+CARD_ORANGE = PatternFill("solid", fgColor="FA8C16")
+CARD_RED = PatternFill("solid", fgColor="FF4D4F")
 WHITE_BOLD = Font(bold=True, color="FFFFFF", size=11)
-TITLE_FONT = Font(bold=True, color="FFFFFF", size=14)
-KPI_FONT = Font(bold=True, color="FFFFFF", size=16)
+TITLE_FONT = Font(bold=True, color="FFFFFF", size=16)
+CARD_LABEL_FONT = Font(bold=True, color="FFFFFF", size=10)
+CARD_VALUE_FONT = Font(bold=True, color="FFFFFF", size=16)
 DARK_BOLD = Font(bold=True, color="001529", size=11)
 NORMAL = Font(color="333333", size=10)
 RED_FONT = Font(bold=True, color="FF4D4F", size=10)
@@ -42,7 +47,7 @@ LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
 
 def thin_border():
-    s = Side(style="thin", color="CCCCCC")
+    s = Side(style="thin", color="D9D9D9")
     return Border(left=s, right=s, top=s, bottom=s)
 
 
@@ -81,7 +86,7 @@ def parse_date(s: str):
             return dt.date(int(y), int(m), int(d))
         if len(parts) == 2:
             m, d = parts
-            return dt.date(2026, int(m), int(d))
+            return dt.date(dt.date.today().year, int(m), int(d))
     except Exception:
         return None
     return None
@@ -132,7 +137,8 @@ class Tx:
 
 
 def load_txs_from_sheet1():
-    with open(os.path.join("data", "sheet1-业绩流水表.csv"), encoding="utf-8") as f:
+    path = os.path.join("data", "sheet1-业绩流水表.csv")
+    with open(path, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
     txs = []
@@ -228,7 +234,10 @@ def build_order_summary(txs):
 
 
 def build_seller_summary(order_rows):
-    agg = defaultdict(lambda: {"company": set(), "sales_company": set(), "customers": 0, "gross": 0, "net": 0, "refund": 0, "rec": 0, "got": 0, "un": 0, "tail_num": 0, "tail_den": 0})
+    agg = defaultdict(lambda: {
+        "company": set(), "sales_company": set(), "customers": 0, "gross": 0, "net": 0, "refund": 0,
+        "rec": 0, "got": 0, "un": 0, "tail_num": 0, "tail_den": 0
+    })
     for r in order_rows:
         seller = r[2]
         a = agg[seller]
@@ -287,12 +296,20 @@ def build_group_summary(order_rows, key_index, key_name):
     return headers, rows
 
 
+def build_daily_net_summary(order_rows):
+    agg = defaultdict(int)
+    for row in order_rows:
+        # 无日期时只能从原始流水做；这里改由外部传 txs 更稳，所以实际不用 order_rows 算日期
+        pass
+    return agg
+
+
 def write_sheet_table(ws, title, headers, rows, widths=None, highlight=None):
     ws.sheet_view.showGridLines = False
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
     title_cell = ws.cell(row=1, column=1, value=title)
     title_cell.fill = TITLE_FILL
-    title_cell.font = TITLE_FONT
+    title_cell.font = Font(bold=True, color="FFFFFF", size=14)
     title_cell.alignment = LEFT
     for c in range(1, len(headers) + 1):
         ws.cell(row=1, column=c).border = thin_border()
@@ -318,11 +335,7 @@ def write_sheet_table(ws, title, headers, rows, widths=None, highlight=None):
                 ws.cell(row=row_idx, column=hl_col).font = rules[v]
         row_idx += 1
 
-    if widths:
-        set_col_width(ws, widths)
-    else:
-        set_col_width(ws, [14] * len(headers))
-
+    set_col_width(ws, widths or [14] * len(headers))
     ws.freeze_panes = "A3"
 
 
@@ -333,9 +346,9 @@ def build_dashboard(wb, txs, order_rows, seller_rows, sales_company_rows, compan
     ws.merge_cells("A1:L1")
     ws["A1"] = "📊 电商业绩分析老板看板"
     ws["A1"].fill = TITLE_FILL
-    ws["A1"].font = Font(bold=True, color="FFFFFF", size=16)
+    ws["A1"].font = TITLE_FONT
     ws["A1"].alignment = CENTER
-    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[1].height = 30
 
     total_gross = sum(r[17] for r in order_rows if isinstance(r[17], int))
     total_net = sum(r[18] for r in order_rows if isinstance(r[18], int))
@@ -343,124 +356,198 @@ def build_dashboard(wb, txs, order_rows, seller_rows, sales_company_rows, compan
     total_orders = len(order_rows)
     total_receivable_tail = sum(r[10] for r in order_rows if isinstance(r[10], int))
     total_received_tail = sum(r[11] for r in order_rows if isinstance(r[11], int))
-    tail_rate = (total_received_tail / total_receivable_tail) if total_receivable_tail else 0
+    total_unpaid_tail = sum(r[12] for r in order_rows if isinstance(r[12], int))
+    tail_rate = (total_received_tail / total_receivable_tail) if total_receivable_tail else None
+    refund_rate = (total_refund / total_gross) if total_gross else None
 
     kpis = [
-        ("总实收业绩", total_gross),
-        ("总净业绩", total_net),
-        ("总退款金额", total_refund),
-        ("订单数", total_orders),
-        ("应收尾款", total_receivable_tail),
-        ("尾款回收率", f"{tail_rate:.1%}" if total_receivable_tail else "--"),
+        ("总实收业绩", total_gross, CARD_BLUE),
+        ("总净业绩", total_net, CARD_GREEN),
+        ("总退款金额", total_refund, CARD_RED),
+        ("退款率", f"{refund_rate:.1%}" if refund_rate is not None else "--", CARD_ORANGE),
+        ("订单数", total_orders, CARD_DARK),
+        ("未收尾款", total_unpaid_tail, CARD_ORANGE),
     ]
 
     start_cols = [1, 3, 5, 7, 9, 11]
-    for (label, value), col in zip(kpis, start_cols):
+    for (label, value, fill), col in zip(kpis, start_cols):
         ws.merge_cells(start_row=3, start_column=col, end_row=3, end_column=col + 1)
-        ws.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col + 1)
-        ws.cell(row=3, column=col, value=label).fill = HEADER_FILL
-        ws.cell(row=3, column=col).font = WHITE_BOLD
-        ws.cell(row=3, column=col).alignment = CENTER
-        ws.cell(row=4, column=col, value=value).fill = KPI_FILL
-        ws.cell(row=4, column=col).font = KPI_FONT
-        ws.cell(row=4, column=col).alignment = CENTER
+        ws.merge_cells(start_row=4, start_column=col, end_row=5, end_column=col + 1)
+        top = ws.cell(row=3, column=col, value=label)
+        top.fill = fill
+        top.font = CARD_LABEL_FONT
+        top.alignment = CENTER
+        val = ws.cell(row=4, column=col, value=value)
+        val.fill = CARD_DARK
+        val.font = CARD_VALUE_FONT
+        val.alignment = CENTER
+        ws.row_dimensions[3].height = 20
+        ws.row_dimensions[4].height = 24
+        ws.row_dimensions[5].height = 16
 
-    # 数据源写到隐藏区域
-    base_col = 20  # T列
-    ws.cell(row=2, column=base_col, value="销售")
-    ws.cell(row=2, column=base_col + 1, value="净业绩")
-    ws.cell(row=2, column=base_col + 2, value="退款金额")
+    # 数据源区域
+    seller_base = 20
+    ws.cell(row=2, column=seller_base, value="销售")
+    ws.cell(row=2, column=seller_base + 1, value="净业绩")
+    ws.cell(row=2, column=seller_base + 2, value="退款金额")
     for i, row in enumerate(seller_rows, 3):
-        ws.cell(row=i, column=base_col, value=row[0])
-        ws.cell(row=i, column=base_col + 1, value=row[5])
-        ws.cell(row=i, column=base_col + 2, value=row[6])
+        ws.cell(row=i, column=seller_base, value=row[0])
+        ws.cell(row=i, column=seller_base + 1, value=row[5])
+        ws.cell(row=i, column=seller_base + 2, value=row[6])
 
-    company_base = 30  # AD列
+    company_base = 30
     ws.cell(row=2, column=company_base, value="公司主体")
     ws.cell(row=2, column=company_base + 1, value="净业绩")
     for i, row in enumerate(company_rows, 3):
         ws.cell(row=i, column=company_base, value=row[0])
         ws.cell(row=i, column=company_base + 1, value=row[3])
 
-    pay_base = 40  # AN列
+    sales_company_base = 35
+    ws.cell(row=2, column=sales_company_base, value="销售公司")
+    ws.cell(row=2, column=sales_company_base + 1, value="净业绩")
+    for i, row in enumerate(sales_company_rows, 3):
+        ws.cell(row=i, column=sales_company_base, value=row[0])
+        ws.cell(row=i, column=sales_company_base + 1, value=row[3])
+
+    pay_base = 40
     pay_map = {"报名费": 0, "尾款": 0, "全款": 0}
+    daily_net = defaultdict(int)
     for t in txs:
         pay_map["报名费"] += t.signup + (t.deposit if t.signup == 0 else 0)
         pay_map["尾款"] += t.tail
         pay_map["全款"] += t.full
+        inflow = t.signup + t.deposit + t.tail + t.full - t.refund
+        daily_net[t.biz_date.isoformat()] += inflow
     ws.cell(row=2, column=pay_base, value="类型")
     ws.cell(row=2, column=pay_base + 1, value="金额")
     for i, key in enumerate(["报名费", "尾款", "全款"], 3):
         ws.cell(row=i, column=pay_base, value=key)
         ws.cell(row=i, column=pay_base + 1, value=pay_map[key])
 
-    # 图1：销售净业绩
+    trend_base = 45
+    ws.cell(row=2, column=trend_base, value="日期")
+    ws.cell(row=2, column=trend_base + 1, value="净流入")
+    trend_items = sorted(daily_net.items())
+    for i, (d, v) in enumerate(trend_items, 3):
+        ws.cell(row=i, column=trend_base, value=d)
+        ws.cell(row=i, column=trend_base + 1, value=v)
+
+    # 图表1：销售净业绩排行
     chart1 = BarChart()
     chart1.type = "col"
     chart1.title = "销售净业绩排行"
     chart1.y_axis.title = "净业绩"
     chart1.x_axis.title = "销售"
     chart1.style = 10
-    chart1.width = 18
-    chart1.height = 9
-    cats1 = Reference(ws, min_col=base_col, min_row=3, max_row=2 + len(seller_rows))
-    data1 = Reference(ws, min_col=base_col + 1, min_row=2, max_row=2 + len(seller_rows))
+    chart1.width = 17
+    chart1.height = 8
+    cats1 = Reference(ws, min_col=seller_base, min_row=3, max_row=2 + len(seller_rows))
+    data1 = Reference(ws, min_col=seller_base + 1, min_row=2, max_row=2 + len(seller_rows))
     chart1.add_data(data1, titles_from_data=True)
     chart1.set_categories(cats1)
-    chart1.series[0].graphicalProperties.solidFill = "1890FF"
-    ws.add_chart(chart1, "A7")
+    chart1.series[0].graphicalProperties.solidFill = "1677FF"
+    ws.add_chart(chart1, "A8")
 
-    # 图2：公司主体净业绩
+    # 图表2：公司主体净业绩
     chart2 = BarChart()
     chart2.type = "col"
     chart2.title = "公司主体净业绩对比"
     chart2.y_axis.title = "净业绩"
     chart2.x_axis.title = "公司主体"
     chart2.style = 10
-    chart2.width = 18
-    chart2.height = 9
+    chart2.width = 17
+    chart2.height = 8
     cats2 = Reference(ws, min_col=company_base, min_row=3, max_row=2 + len(company_rows))
     data2 = Reference(ws, min_col=company_base + 1, min_row=2, max_row=2 + len(company_rows))
     chart2.add_data(data2, titles_from_data=True)
     chart2.set_categories(cats2)
     chart2.series[0].graphicalProperties.solidFill = "52C41A"
-    ws.add_chart(chart2, "G7")
+    ws.add_chart(chart2, "G8")
 
-    # 图3：付款结构
-    chart3 = PieChart()
-    chart3.title = "付款结构占比"
-    chart3.width = 18
-    chart3.height = 10
-    labels3 = Reference(ws, min_col=pay_base, min_row=3, max_row=5)
-    data3 = Reference(ws, min_col=pay_base + 1, min_row=2, max_row=5)
+    # 图表3：日净流入趋势
+    chart3 = LineChart()
+    chart3.title = "每日净流入趋势"
+    chart3.y_axis.title = "净流入"
+    chart3.x_axis.title = "日期"
+    chart3.style = 10
+    chart3.width = 17
+    chart3.height = 8
+    cats3 = Reference(ws, min_col=trend_base, min_row=3, max_row=2 + len(trend_items))
+    data3 = Reference(ws, min_col=trend_base + 1, min_row=2, max_row=2 + len(trend_items))
     chart3.add_data(data3, titles_from_data=True)
-    chart3.set_categories(labels3)
-    for i, color in enumerate(["1890FF", "FA8C16", "52C41A"]):
+    chart3.set_categories(cats3)
+    chart3.series[0].graphicalProperties.line.solidFill = "FA8C16"
+    ws.add_chart(chart3, "A25")
+
+    # 图表4：付款结构
+    chart4 = PieChart()
+    chart4.title = "付款结构占比"
+    chart4.width = 17
+    chart4.height = 8
+    labels4 = Reference(ws, min_col=pay_base, min_row=3, max_row=5)
+    data4 = Reference(ws, min_col=pay_base + 1, min_row=2, max_row=5)
+    chart4.add_data(data4, titles_from_data=True)
+    chart4.set_categories(labels4)
+    for i, color in enumerate(["1677FF", "FA8C16", "52C41A"]):
         pt = DataPoint(idx=i)
         pt.graphicalProperties.solidFill = color
-        chart3.series[0].dPt.append(pt)
-    ws.add_chart(chart3, "A24")
+        chart4.series[0].dPt.append(pt)
+    ws.add_chart(chart4, "G25")
 
-    # 风险区
-    ws["G24"] = "退款/尾款风险提示"
-    ws["G24"].fill = TITLE_FILL
-    ws["G24"].font = WHITE_BOLD
-    ws["G24"].alignment = CENTER
-    risk_headers = ["销售", "净业绩", "退款金额", "退款率", "尾款回收率"]
-    for i, h in enumerate(risk_headers, 7):
-        ws.cell(row=25, column=i, value=h)
-    set_header_row(ws, 25, len(risk_headers))
-    r = 26
+    # 排行区
+    ws.merge_cells("A42:F42")
+    ws["A42"] = "🏆 销售排行榜"
+    ws["A42"].fill = TITLE_FILL
+    ws["A42"].font = WHITE_BOLD
+    ws["A42"].alignment = CENTER
+    seller_headers = ["排名", "销售", "净业绩", "退款金额", "退款率", "尾款回收率"]
+    for i, h in enumerate(seller_headers, 1):
+        ws.cell(row=43, column=i, value=h)
+    set_header_row(ws, 43, len(seller_headers))
+    row_no = 44
+    for row in seller_rows[:10]:
+        vals = [row[12], row[0], row[5], row[6], row[7], row[11]]
+        for i, v in enumerate(vals, 1):
+            ws.cell(row=row_no, column=i, value=v)
+        style_row(ws, row_no, len(seller_headers), SUB_FILL if row_no % 2 == 0 else None)
+        row_no += 1
+
+    ws.merge_cells("H42:L42")
+    ws["H42"] = "⚠️ 风险提示"
+    ws["H42"].fill = TITLE_FILL
+    ws["H42"].font = WHITE_BOLD
+    ws["H42"].alignment = CENTER
+    risk_headers = ["销售", "退款率", "未收尾款", "尾款回收率", "风险等级"]
+    for i, h in enumerate(risk_headers, 8):
+        ws.cell(row=43, column=i, value=h)
+    set_header_row(ws, 43, len(risk_headers))
+    row_no = 44
     for row in seller_rows:
-        ws.cell(row=r, column=7, value=row[0])
-        ws.cell(row=r, column=8, value=row[5])
-        ws.cell(row=r, column=9, value=row[6])
-        ws.cell(row=r, column=10, value=row[7])
-        ws.cell(row=r, column=11, value=row[11])
-        style_row(ws, r, 5, SUB_FILL if r % 2 == 0 else None)
-        r += 1
+        refund_rate = row[7]
+        unpaid = row[10]
+        tail = row[11]
+        level = "正常"
+        font = GREEN_FONT
+        try:
+            rrate = float(str(refund_rate).replace('%', ''))
+        except Exception:
+            rrate = 0
+        if rrate >= 50 or (isinstance(unpaid, int) and unpaid > 10000):
+            level = "高风险"
+            font = RED_FONT
+        elif rrate >= 20 or (isinstance(unpaid, int) and unpaid > 3000):
+            level = "中风险"
+            font = ORANGE_FONT
+        vals = [row[0], refund_rate, unpaid, tail, level]
+        for i, v in enumerate(vals, 8):
+            ws.cell(row=row_no, column=i, value=v)
+            ws.cell(row=row_no, column=i).font = font if i == 12 else NORMAL
+        style_row(ws, row_no, len(risk_headers), SUB_FILL if row_no % 2 == 0 else None)
+        ws.cell(row=row_no, column=12).font = font
+        row_no += 1
 
-    set_col_width(ws, [16] * 12)
+    set_col_width(ws, [15, 15, 15, 15, 15, 15, 4, 15, 15, 15, 15, 15])
+    ws.freeze_panes = "A8"
 
 
 def main():
@@ -503,7 +590,7 @@ def main():
     write_sheet_table(ws5, "公司主体业绩汇总", company_headers, company_rows)
 
     wb.save(OUTPUT_FILE)
-    print(f"✅ 已生成多Sheet文件：{OUTPUT_FILE}")
+    print(f"✅ 已生成正式版仪表盘：{OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
