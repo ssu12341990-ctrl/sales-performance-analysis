@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - 老板汇报版 v10.3
+"""电商业绩分析老板看板 - 老板汇报版 v10.4
 
 更新：
-- 老板看板移除周度/每日经营趋势柱状图（保留其他核心图表）
-- 销售净业绩图按企业主体分色展示
-- 继续兼容旧版 Python，维持当前唯一校验与异常校验逻辑
+- 支持读取真实数据文件 data/销售_业绩new.csv（优先）
+- 若不存在则回退读取 data/sheet1-业绩流水表.csv（兼容原流程）
+- 老板看板：移除经营趋势图；销售净业绩按企业主体分色
+- 继续兼容旧版 Python
 
 输出文件：电商业绩分析老板看板.xlsx
 依赖：pip install openpyxl
@@ -25,6 +26,11 @@ from openpyxl.chart.series import DataPoint
 
 SIGNUP_FEE = 1800
 OUTPUT_FILE = "电商业绩分析老板看板.xlsx"
+
+# 真实数据文件（你指定的位置）
+REAL_DATA_FILE = os.path.join("data", "销售_业绩new.csv")
+# 兼容旧流程的默认文件
+DEFAULT_DATA_FILE = os.path.join("data", "sheet1-业绩流水表.csv")
 
 HEADER_FILL = PatternFill("solid", fgColor="1D39C4")
 SUB_FILL = PatternFill("solid", fgColor="F7FAFC")
@@ -149,13 +155,33 @@ class Tx:
         return phone or name
 
 
+def _detect_data_path():
+    """优先使用你指定的真实数据文件；不存在则回退默认文件。"""
+    if os.path.exists(REAL_DATA_FILE):
+        return REAL_DATA_FILE
+    return DEFAULT_DATA_FILE
+
+
 def load_txs():
-    path = os.path.join("data", "sheet1-业绩流水表.csv")
-    with open(path, encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+    path = _detect_data_path()
+    # 兼容常见编码问题：优先 utf-8，失败后尝试 gbk
+    rows = None
+    last_err = None
+    for enc in ("utf-8", "utf-8-sig", "gbk"):
+        try:
+            with open(path, encoding=enc) as f:
+                rows = list(csv.DictReader(f))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            rows = None
+    if rows is None:
+        raise last_err
+
     txs = []
     for r in rows:
-        biz_date = parse_date(pick(r, "开单日期", "业务日期"))
+        biz_date = parse_date(pick(r, "开单日期", "开单日期 ", "业务日期"))
         if not biz_date:
             continue
         company = (pick(r, "公司主体") or "").strip()
@@ -182,6 +208,8 @@ def load_txs():
         txs.append(tx)
     return txs
 
+
+# 下面逻辑与 v10.3 保持一致（略去无关改动）
 
 def summarize_orders(txs):
     agg = defaultdict(lambda: {"company": "", "sales_company": "", "seller": "", "customer": "", "phone": "", "lead_date": None, "deposit": 0, "signup": 0, "tail": 0, "full": 0, "refund": 0, "total_price": 0})
@@ -357,7 +385,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     ws["A1"].font = TITLE_FONT
     ws["A1"].alignment = CENTER
     ws.merge_cells("A2:L2")
-    ws["A2"] = "汇报日期：%s  |  数据来源：sheet1-业绩流水表.csv  |  订单唯一口径=客户姓名+客户电话  |  销售公司=公司主体" % dt.date.today().isoformat()
+    ws["A2"] = "汇报日期：%s  |  数据来源：%s  |  订单唯一口径=客户姓名+客户电话  |  销售公司=公司主体" % (dt.date.today().isoformat(), _detect_data_path())
     ws["A2"].fill = TITLE_FILL
     ws["A2"].font = SUBTITLE_FONT
     ws["A2"].alignment = CENTER
