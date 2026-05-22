@@ -1,16 +1,25 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - Excel 一键生成脚本 v5.1（支持订金）
+"""电商业绩分析老板看板 - 单Sheet版 v5.2
 
-标准流水建议字段：
-开单日期/业务日期,公司主体,销售公司,销售/销售姓名,客户姓名,年龄,客户电话,客户进线日期,订金,报名费,尾款,全款,退款,产品总价,备注
+需求：把 data/ 下面的数据和分析结果都放到同一个 Excel 的同一个 Sheet 里，
+不要拆成多个 Sheet。
 
-关键口径：
-1. 报名费固定口径仍按 1800
-2. 若【订金>0 且 报名费>0】，则“订金包含在报名费里”，统计报名费业绩时不能重复累计订金
-3. 若【订金>0 且 报名费=0】，则订金计入实收业绩，但不强制视为报名费
-4. 产品总价优先级：手填产品总价 > 全款 > 报名费(1800)+尾款 > 未知
-5. 应收尾款 = 产品总价 - 1800
-6. 若只有报名费/订金，未形成完整尾款口径，则尾款回收率显示 --
+当前实现：
+- 仅生成 1 个工作表：总表
+- 同一个 Sheet 内分区展示：
+  1. 原始流水
+  2. 客户订单汇总
+  3. 销售业绩汇总
+  4. 销售公司业绩汇总
+  5. 公司主体业绩汇总
+  6. 查询分析
+
+数据口径：
+- 支持 开单日期/业务日期、销售/销售姓名、客户进线日/客户进线日期、订金/定金
+- 有订金且有报名费：订金包含在报名费里，不重复统计
+- 有订金但没报名费：订金计入实收
+- 产品总价优先：手填产品总价 > 全款 > 1800+尾款
+- 尾款回收率：若仅有首款、未形成完整尾款口径，则显示 --
 """
 
 import csv
@@ -21,7 +30,6 @@ from collections import defaultdict
 
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.chart import BarChart, Reference
 from openpyxl.utils import get_column_letter
 
 SIGNUP_FEE = 1800
@@ -29,8 +37,9 @@ OUTPUT_FILE = "电商业绩分析老板看板.xlsx"
 
 HEADER_FILL = PatternFill("solid", fgColor="1890FF")
 SUB_FILL = PatternFill("solid", fgColor="E6F0FF")
-KPI_FILL = PatternFill("solid", fgColor="001529")
+TITLE_FILL = PatternFill("solid", fgColor="001529")
 WHITE_BOLD = Font(bold=True, color="FFFFFF", size=11)
+TITLE_FONT = Font(bold=True, color="FFFFFF", size=13)
 DARK_BOLD = Font(bold=True, color="001529", size=11)
 NORMAL = Font(color="333333", size=10)
 RED_FONT = Font(bold=True, color="FF4D4F", size=10)
@@ -100,12 +109,11 @@ def to_int(x):
         return 0
 
 
-def week_start(d: dt.date):
-    return d - dt.timedelta(days=d.weekday())
-
-
-def month_key(d: dt.date):
-    return f"{d.year}年{d.month}月"
+def pick(d, *names):
+    for n in names:
+        if n in d:
+            return d.get(n)
+    return None
 
 
 @dataclass
@@ -131,20 +139,10 @@ class Tx:
         return (self.phone or "").strip() or (self.customer or "").strip()
 
 
-def read_csv_dicts(path):
-    with open(path, encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def pick(d, *names):
-    for n in names:
-        if n in d:
-            return d.get(n)
-    return None
-
-
 def load_txs_from_sheet1():
-    rows = read_csv_dicts(os.path.join("data", "sheet1-业绩流水表.csv"))
+    with open(os.path.join("data", "sheet1-业绩流水表.csv"), encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
     txs = []
     for r in rows:
         biz_date = parse_date(pick(r, "开单日期", "业务日期"))
@@ -173,46 +171,6 @@ def load_txs_from_sheet1():
     return txs
 
 
-def ws_from_rows(wb, name, headers, rows, widths=None, highlight=None):
-    ws = wb.create_sheet(name)
-    ws.sheet_view.showGridLines = False
-    ws.row_dimensions[1].height = 28
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=1, column=i, value=h)
-    set_header_row(ws, 1, len(headers))
-
-    hl_col = None
-    rules = {}
-    if highlight and highlight.get("col") in headers:
-        hl_col = headers.index(highlight["col"]) + 1
-        rules = highlight.get("rules") or {}
-
-    for r_i, row in enumerate(rows, 2):
-        for c_i, val in enumerate(row, 1):
-            ws.cell(row=r_i, column=c_i, value=val)
-        style_row(ws, r_i, len(headers), SUB_FILL if r_i % 2 == 0 else None)
-        if hl_col:
-            v = ws.cell(row=r_i, column=hl_col).value
-            if v in rules:
-                ws.cell(row=r_i, column=hl_col).font = rules[v]
-
-    if widths:
-        set_col_width(ws, widths)
-    return ws
-
-
-def build_raw_sheet(wb, txs):
-    headers = ["开单日期", "公司主体", "销售公司", "销售", "客户姓名", "年龄", "客户电话", "客户进线日期", "订金", "报名费", "尾款", "全款", "退款", "产品总价", "备注"]
-    rows = []
-    for t in txs:
-        rows.append([
-            t.biz_date.isoformat(), t.company, t.sales_company, t.seller, t.customer, t.age, t.phone,
-            t.lead_date.isoformat() if t.lead_date else "", t.deposit, t.signup, t.tail, t.full, t.refund,
-            t.total_price if t.total_price else "", t.note,
-        ])
-    ws_from_rows(wb, "业绩流水表", headers, rows, widths=[12,10,12,10,10,8,14,12,10,10,10,10,10,10,18])
-
-
 def build_order_summary(txs):
     agg = defaultdict(lambda: {
         "company":"", "sales_company":"", "seller":"", "customer":"", "phone":"", "lead_date":None,
@@ -236,11 +194,7 @@ def build_order_summary(txs):
 
     rows = []
     for _, a in agg.items():
-        # 真实首款统计口径：
-        # 1) 有报名费时，订金包含在报名费内，不重复加
-        # 2) 无报名费但有订金时，订金计入实收
         first_payment = a["signup"] if a["signup"] > 0 else a["deposit"]
-
         total_price = a["total_price"]
         if not total_price:
             if a["full"] > 0:
@@ -252,12 +206,7 @@ def build_order_summary(txs):
         received_tail = a["tail"]
         if a["full"] > 0:
             received_tail = max(received_tail, a["full"] - SIGNUP_FEE)
-
-        if total_price and receivable_tail > 0 and (a["tail"] > 0 or a["full"] > 0):
-            tail_rate = f"{(received_tail / receivable_tail):.1%}"
-        else:
-            tail_rate = "--"
-
+        tail_rate = f"{(received_tail / receivable_tail):.1%}" if total_price and receivable_tail > 0 and (a["tail"] > 0 or a["full"] > 0) else "--"
         unpaid_tail = receivable_tail - received_tail if total_price else 0
         gross = first_payment + a["tail"] + a["full"]
         net = gross - a["refund"]
@@ -313,21 +262,14 @@ def build_seller_summary(order_rows):
             seller,
             ",".join(sorted(a["company"])),
             ",".join(sorted(a["sales_company"])) if a["sales_company"] else "",
-            a["customers"],
-            a["gross"],
-            a["net"],
-            a["refund"],
-            f"{refund_rate:.1%}",
-            a["rec"],
-            a["got"],
-            a["un"],
-            f"{tail_rate:.1%}" if tail_rate is not None else "--",
+            a["customers"], a["gross"], a["net"], a["refund"], f"{refund_rate:.1%}",
+            a["rec"], a["got"], a["un"], f"{tail_rate:.1%}" if tail_rate is not None else "--",
             0,
         ])
     rows.sort(key=lambda r: r[5], reverse=True)
     for i, r in enumerate(rows, 1):
         r[-1] = i
-    headers = ["销售", "公司主体(集合)", "销售公司(集合)", "客户数", "实收业绩", "净业绩", "退款金额", "退款率", "应收尾款", "已收尾款", "未收尾款", "尾款回收率", "排名(按净业绩)"]
+    headers = ["销售", "公司主体(集合)", "销售公司(集合)", "客户数", "实收业绩", "净业绩", "退款金额", "退款率", "应收尾款", "已收尾款", "未收尾款", "尾款回收率", "排名"]
     return headers, rows
 
 
@@ -353,89 +295,87 @@ def build_group_summary(order_rows, key_index, key_name):
     return headers, rows
 
 
-def build_query_sheet(wb, order_rows):
-    ws = wb.create_sheet("查询分析")
-    ws.sheet_view.showGridLines = False
-    ws.merge_cells("A1:N1")
-    ws["A1"] = "🔎 查询分析（支持订金口径）"
-    ws["A1"].fill = KPI_FILL
-    ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
-    ws["A1"].alignment = CENTER
+def write_section_title(ws, row, title, max_col):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max_col)
+    cell = ws.cell(row=row, column=1, value=title)
+    cell.fill = TITLE_FILL
+    cell.font = TITLE_FONT
+    cell.alignment = LEFT
+    for c in range(1, max_col + 1):
+        ws.cell(row=row, column=c).border = thin_border()
 
-    r = 3
-    ws[f"A{r}"] = "全款/报名费无尾款客户查询"; ws[f"A{r}"].font = DARK_BOLD
-    r += 1
-    headers = ["客户", "销售", "公司主体", "订金", "报名费", "首款计入口径", "尾款", "全款", "退款", "尾款回收率"]
+
+def write_table(ws, start_row, title, headers, rows, widths=None, highlight=None):
+    max_col = len(headers)
+    write_section_title(ws, start_row, title, max_col)
+    header_row = start_row + 1
     for i, h in enumerate(headers, 1):
-        ws.cell(row=r, column=i, value=h)
-    set_header_row(ws, r, len(headers))
-    r += 1
-    for row in order_rows[:300]:
-        vals = [row[3], row[2], row[0], row[6], row[7], row[8], row[14], row[15], row[16], row[13]]
-        for i, v in enumerate(vals, 1):
+        ws.cell(row=header_row, column=i, value=h)
+    set_header_row(ws, header_row, max_col)
+
+    hl_col = None
+    rules = {}
+    if highlight and highlight.get("col") in headers:
+        hl_col = headers.index(highlight["col"]) + 1
+        rules = highlight.get("rules") or {}
+
+    r = header_row + 1
+    for row in rows:
+        for i, v in enumerate(row, 1):
             ws.cell(row=r, column=i, value=v)
-        style_row(ws, r, len(headers), SUB_FILL if r % 2 == 0 else None)
+        style_row(ws, r, max_col, SUB_FILL if r % 2 == 0 else None)
+        if hl_col:
+            v = ws.cell(row=r, column=hl_col).value
+            if v in rules:
+                ws.cell(row=r, column=hl_col).font = rules[v]
         r += 1
-    set_col_width(ws, [12,10,10,10,10,12,10,10,10,10,14,14,14,14])
 
+    if widths:
+        set_col_width(ws, widths)
 
-def build_charts(wb, seller_rows):
-    ws = wb.create_sheet("图表分析")
-    ws.sheet_view.showGridLines = False
-    ws.merge_cells("A1:P1")
-    ws["A1"] = "📈 图表分析"
-    ws["A1"].fill = KPI_FILL
-    ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
-    ws["A1"].alignment = CENTER
-
-    base_col = 19
-    ws.cell(row=2, column=base_col, value="销售")
-    ws.cell(row=2, column=base_col+1, value="实收业绩")
-    ws.cell(row=2, column=base_col+2, value="净业绩")
-    for i, r in enumerate(seller_rows, 3):
-        ws.cell(row=i, column=base_col, value=r[0])
-        ws.cell(row=i, column=base_col+1, value=r[4])
-        ws.cell(row=i, column=base_col+2, value=r[5])
-    max_row = 2 + len(seller_rows)
-
-    chart = BarChart()
-    chart.type = "col"
-    chart.title = "销售实收业绩 vs 净业绩"
-    chart.width = 22
-    chart.height = 12
-    cats = Reference(ws, min_col=base_col, min_row=3, max_row=max_row)
-    data = Reference(ws, min_col=base_col+1, max_col=base_col+2, min_row=2, max_row=max_row)
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    ws.add_chart(chart, "A3")
+    return r + 2
 
 
 def main():
     txs = load_txs_from_sheet1()
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-
-    build_raw_sheet(wb, txs)
     order_headers, order_rows = build_order_summary(txs)
-    ws_from_rows(wb, "客户订单汇总表", order_headers, order_rows,
-                 widths=[10,12,8,10,14,12,10,10,12,10,10,10,10,10,10,10,10,10,10,10],
-                 highlight={"col":"退款状态", "rules":{"已退款":RED_FONT, "部分退款":ORANGE_FONT, "未退款":GREEN_FONT}})
-
     seller_headers, seller_rows = build_seller_summary(order_rows)
-    ws_from_rows(wb, "销售业绩汇总表", seller_headers, seller_rows,
-                 widths=[10,18,18,10,12,12,10,10,10,10,10,10,10])
+    sales_company_headers, sales_company_rows = build_group_summary(order_rows, 1, "销售公司")
+    company_headers, company_rows = build_group_summary(order_rows, 0, "公司主体")
 
-    sc_headers, sc_rows = build_group_summary(order_rows, 1, "销售公司")
-    ws_from_rows(wb, "销售公司业绩汇总表", sc_headers, sc_rows)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "总表"
+    ws.sheet_view.showGridLines = False
 
-    c_headers, c_rows = build_group_summary(order_rows, 0, "公司主体")
-    ws_from_rows(wb, "公司主体业绩汇总表", c_headers, c_rows)
+    row = 1
 
-    build_query_sheet(wb, order_rows)
-    build_charts(wb, seller_rows)
+    raw_headers = ["开单日期", "公司主体", "销售公司", "销售", "客户姓名", "年龄", "客户电话", "客户进线日期", "订金", "报名费", "尾款", "全款", "退款", "产品总价", "备注"]
+    raw_rows = []
+    for t in txs:
+        raw_rows.append([
+            t.biz_date.isoformat(), t.company, t.sales_company, t.seller, t.customer, t.age, t.phone,
+            t.lead_date.isoformat() if t.lead_date else "", t.deposit, t.signup, t.tail, t.full, t.refund,
+            t.total_price if t.total_price else "", t.note,
+        ])
+    row = write_table(ws, row, "1. 原始流水", raw_headers, raw_rows, widths=[12,10,12,10,10,8,14,12,10,10,10,10,10,10,20])
+
+    row = write_table(ws, row, "2. 客户订单汇总", order_headers, order_rows,
+                      widths=[10,12,8,10,14,12,10,10,12,10,10,10,10,10,10,10,10,10,10,10],
+                      highlight={"col":"退款状态", "rules":{"已退款":RED_FONT, "部分退款":ORANGE_FONT, "未退款":GREEN_FONT}})
+
+    row = write_table(ws, row, "3. 销售业绩汇总", seller_headers, seller_rows,
+                      widths=[10,18,18,10,12,12,10,10,10,10,10,10,8])
+
+    row = write_table(ws, row, "4. 销售公司业绩汇总", sales_company_headers, sales_company_rows)
+    row = write_table(ws, row, "5. 公司主体业绩汇总", company_headers, company_rows)
+
+    query_headers = ["客户", "销售", "公司主体", "订金", "报名费", "首款计入口径", "尾款", "全款", "退款", "尾款回收率"]
+    query_rows = [[r[3], r[2], r[0], r[6], r[7], r[8], r[14], r[15], r[16], r[13]] for r in order_rows]
+    row = write_table(ws, row, "6. 查询分析", query_headers, query_rows)
 
     wb.save(OUTPUT_FILE)
-    print(f"✅ 已生成：{OUTPUT_FILE}")
+    print(f"✅ 已生成单Sheet文件：{OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
