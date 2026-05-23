@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - 老板汇报版 v10.5
+"""电商业绩分析老板看板 - 老板汇报版 v10.6
 
 更新：
 - 优先读取真实数据文件 data/销售_业绩new.csv（不存在则回退 data/sheet1-业绩流水表.csv）
-- 老板看板：移除经营趋势图；销售净业绩按企业主体分色
-- 新增：导入问题行落表到单独 Sheet（问题明细），避免“静默丢行”导致看板全 0
-
-说明：
-- 任何导入失败（日期解析失败 / 必填字段为空 / 金额解析异常等）都会记录到“问题明细”
-- 正常数据仍按原逻辑汇总
+- 老板看板：销售净业绩图表按企业主体分色
+- 公司主体净业绩对比图：每个公司主体单独颜色（按 COMPANY_COLORS 映射）
+- 新增：导入问题行落表到单独 Sheet（问题明细）
 
 输出文件：电商业绩分析老板看板.xlsx
 依赖：pip install openpyxl
@@ -53,13 +50,19 @@ ORANGE_FONT = Font(bold=True, color="FA8C16", size=10)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
+# 颜色映射：可自行扩展更多公司主体
 COMPANY_COLORS = {
-    "汉教": "1677FF",
-    "鸿业": "52C41A",
-    "心途": "FA8C16",
-    "(空)": "BFBFBF",
+    "汉教": "1677FF",  # 蓝
+    "鸿业": "52C41A",  # 绿
+    "心途": "FA8C16",  # 橙
+    "(空)": "BFBFBF",  # 灰
 }
-DEFAULT_COMPANY_COLOR = "722ED1"
+DEFAULT_COMPANY_COLOR = "722ED1"  # 紫（未配置的公司主体）
+
+
+def _company_color(name: str) -> str:
+    name = (name or "").strip() or "(空)"
+    return COMPANY_COLORS.get(name, DEFAULT_COMPANY_COLOR)
 
 
 def thin_border():
@@ -92,7 +95,6 @@ def set_col_width(ws, widths):
 
 
 def parse_date(s: Any) -> Optional[dt.date]:
-    """兼容：yyyy/mm/dd、yyyy-mm-dd、m/d、并容忍前后空格。"""
     s = ("" if s is None else str(s)).strip()
     if not s:
         return None
@@ -165,7 +167,6 @@ def _detect_data_path() -> str:
 
 
 def _read_csv_dict_rows(path: str) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """读取 CSV（兼容 utf-8/utf-8-sig/gbk）。返回 fieldnames 与 dict rows。"""
     last_err = None
     for enc in ("utf-8", "utf-8-sig", "gbk"):
         try:
@@ -179,25 +180,19 @@ def _read_csv_dict_rows(path: str) -> Tuple[List[str], List[Dict[str, Any]]]:
 
 
 def load_txs_with_issues() -> Tuple[List[Tx], List[str], List[Dict[str, Any]]]:
-    """返回：有效交易 txs、原始表头 fieldnames、问题行 issues。
-
-    issues 每条包含：row_index(从2开始)、reason、raw(原始字典)
-    """
     path = _detect_data_path()
     fieldnames, rows = _read_csv_dict_rows(path)
 
     txs: List[Tx] = []
     issues: List[Dict[str, Any]] = []
 
-    for i, r in enumerate(rows, start=2):  # start=2 表示 CSV 第2行是第一条数据
-        # 1) 日期
+    for i, r in enumerate(rows, start=2):
         biz_raw = pick(r, "开单日期", "业务日期")
         biz_date = parse_date(biz_raw)
         if not biz_date:
             issues.append({"row_index": i, "reason": "开单日期解析失败", "raw": r})
             continue
 
-        # 2) 必填字段
         company = (pick(r, "公司主体") or "").strip()
         seller = (pick(r, "销售", "销售姓名") or "").strip()
         customer = (pick(r, "客户姓名") or "").strip()
@@ -227,7 +222,6 @@ def load_txs_with_issues() -> Tuple[List[Tx], List[str], List[Dict[str, Any]]]:
             )
         )
 
-    # 如果整表都解析失败，issues 里会有原因，方便定位
     return txs, fieldnames, issues
 
 
@@ -397,7 +391,6 @@ def write_sheet_table(ws, title, headers, rows, widths=None, highlight=None):
 
 
 def write_import_issues_sheet(wb, data_path: str, fieldnames: List[str], issues: List[Dict[str, Any]]):
-    """把导入问题行写到一个 Sheet，方便你回到源数据修正。"""
     ws = wb.create_sheet("问题明细")
     ws.sheet_view.showGridLines = False
 
@@ -423,7 +416,6 @@ def write_import_issues_sheet(wb, data_path: str, fieldnames: List[str], issues:
         style_row(ws, r, len(headers), SUB_FILL if r % 2 == 1 else None, align=LEFT)
         r += 1
 
-    # 宽度
     widths = [10, 26] + [14] * max(1, len(headers) - 2)
     set_col_width(ws, widths[: len(headers)])
     ws.freeze_panes = "A3"
@@ -468,6 +460,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
         ws.cell(row=5, column=col).font = CARD_VALUE_FONT
         ws.cell(row=5, column=col).alignment = CENTER
 
+    # --- Top Sellers chart (vary colors by primary company)
     seller_base = 20
     ws.cell(row=2, column=seller_base, value="销售")
     ws.cell(row=2, column=seller_base + 1, value="净业绩")
@@ -478,13 +471,16 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
         ws.cell(row=i, column=seller_base + 1, value=row[5])
         ws.cell(row=i, column=seller_base + 2, value=row[13])
 
+    # --- Company chart data
     company_base = 30
     ws.cell(row=2, column=company_base, value="公司主体")
     ws.cell(row=2, column=company_base + 1, value="净业绩")
-    for i, row in enumerate(company_rows[:10], 3):
+    top_companies = company_rows[:10]
+    for i, row in enumerate(top_companies, 3):
         ws.cell(row=i, column=company_base, value=row[0])
         ws.cell(row=i, column=company_base + 1, value=row[3])
 
+    # --- Payment structure
     pay_base = 40
     pay_map = {"订金": 0, "报名费": 0, "尾款": 0, "全款": 0}
     for t in txs:
@@ -498,6 +494,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
         ws.cell(row=i, column=pay_base, value=key)
         ws.cell(row=i, column=pay_base + 1, value=pay_map[key])
 
+    # --- Lead top
     lead_base = 50
     ws.cell(row=2, column=lead_base, value="进线日期")
     ws.cell(row=2, column=lead_base + 1, value="净产值")
@@ -506,33 +503,52 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
         ws.cell(row=i, column=lead_base, value=row[0])
         ws.cell(row=i, column=lead_base + 1, value=row[8])
 
+    # --- Chart1: sellers net performance colored by company
     chart1 = BarChart()
     chart1.type = "bar"
     chart1.title = "销售净业绩排行（按企业分色）"
     chart1.width = 17
     chart1.height = 9
-    chart1.add_data(Reference(ws, min_col=seller_base + 1, min_row=2, max_row=2 + len(top_sellers)), titles_from_data=True)
+    chart1.add_data(
+        Reference(ws, min_col=seller_base + 1, min_row=2, max_row=2 + len(top_sellers)),
+        titles_from_data=True,
+    )
     chart1.set_categories(Reference(ws, min_col=seller_base, min_row=3, max_row=2 + len(top_sellers)))
     if chart1.series:
-        series = chart1.series[0]
+        s = chart1.series[0]
+        # ensure each bar uses its own DataPoint styling
+        s.dPt = []
         for idx, row in enumerate(top_sellers):
             company = row[13] or "(空)"
-            color = COMPANY_COLORS.get(company, DEFAULT_COMPANY_COLOR)
+            color = _company_color(company)
             pt = DataPoint(idx=idx)
             pt.graphicalProperties.solidFill = color
-            series.dPt.append(pt)
+            s.dPt.append(pt)
     ws.add_chart(chart1, "A9")
 
+    # --- Chart2: company net performance, each company its own color
     chart2 = BarChart()
     chart2.type = "col"
-    chart2.title = "公司主体净业绩对比"
+    chart2.title = "公司主体净业绩对比（按企业分色）"
     chart2.width = 17
     chart2.height = 9
-    chart2.add_data(Reference(ws, min_col=company_base + 1, min_row=2, max_row=2 + min(len(company_rows), 10)), titles_from_data=True)
-    chart2.set_categories(Reference(ws, min_col=company_base, min_row=3, max_row=2 + min(len(company_rows), 10)))
-    chart2.series[0].graphicalProperties.solidFill = "52C41A"
+    chart2.add_data(
+        Reference(ws, min_col=company_base + 1, min_row=2, max_row=2 + len(top_companies)),
+        titles_from_data=True,
+    )
+    chart2.set_categories(Reference(ws, min_col=company_base, min_row=3, max_row=2 + len(top_companies)))
+    if chart2.series:
+        s = chart2.series[0]
+        s.dPt = []
+        for idx, row in enumerate(top_companies):
+            company = row[0] or "(空)"
+            color = _company_color(company)
+            pt = DataPoint(idx=idx)
+            pt.graphicalProperties.solidFill = color
+            s.dPt.append(pt)
     ws.add_chart(chart2, "G9")
 
+    # --- Chart3: pie
     chart3 = PieChart()
     chart3.title = "收款结构占比"
     chart3.width = 17
@@ -545,6 +561,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
         chart3.series[0].dPt.append(pt)
     ws.add_chart(chart3, "A27")
 
+    # tables
     ws.merge_cells("A43:F43")
     ws["A43"] = "🏆 销售排行榜"
     ws["A43"].fill = TITLE_FILL
@@ -596,7 +613,7 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
     ws["A58"].fill = TITLE_FILL
     ws["A58"].font = WHITE_BOLD
     ws["A58"].alignment = CENTER
-    legend_items = [("汉教", COMPANY_COLORS["汉教"]), ("鸿业", COMPANY_COLORS["鸿业"]), ("心途", COMPANY_COLORS["心途"]), ("其他", DEFAULT_COMPANY_COLOR)]
+    legend_items = [("汉教", _company_color("汉教")), ("鸿业", _company_color("鸿业")), ("心途", _company_color("心途")), ("其他", DEFAULT_COMPANY_COLOR)]
     start_row = 59
     for idx, item in enumerate(legend_items):
         name, color = item
@@ -655,7 +672,6 @@ def main():
     ws9 = wb.create_sheet("异常校验")
     write_sheet_table(ws9, "异常校验", abnormal_headers, abnormal_rows, widths=[14, 10, 10, 12, 14, 28])
 
-    # 新增：问题明细
     write_import_issues_sheet(wb, data_path, fieldnames, import_issues)
 
     wb.save(OUTPUT_FILE)
