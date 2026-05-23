@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""电商业绩分析老板看板 - 老板汇报版 v10.4
+"""电商业绩分析老板看板 - 老板汇报版 v10.5
 
 更新：
-- 支持读取真实数据文件 data/销售_业绩new.csv（优先）
-- 若不存在则回退读取 data/sheet1-业绩流水表.csv（兼容原流程）
+- 优先读取真实数据文件 data/销售_业绩new.csv（不存在则回退 data/sheet1-业绩流水表.csv）
 - 老板看板：移除经营趋势图；销售净业绩按企业主体分色
-- 继续兼容旧版 Python
+- 新增：导入问题行落表到单独 Sheet（问题明细），避免“静默丢行”导致看板全 0
+
+说明：
+- 任何导入失败（日期解析失败 / 必填字段为空 / 金额解析异常等）都会记录到“问题明细”
+- 正常数据仍按原逻辑汇总
 
 输出文件：电商业绩分析老板看板.xlsx
 依赖：pip install openpyxl
@@ -16,7 +19,7 @@ import os
 import datetime as dt
 from dataclasses import dataclass
 from collections import defaultdict, Counter
-from typing import Optional
+from typing import Optional, Tuple, List, Dict, Any
 
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -27,9 +30,7 @@ from openpyxl.chart.series import DataPoint
 SIGNUP_FEE = 1800
 OUTPUT_FILE = "电商业绩分析老板看板.xlsx"
 
-# 真实数据文件（你指定的位置）
 REAL_DATA_FILE = os.path.join("data", "销售_业绩new.csv")
-# 兼容旧流程的默认文件
 DEFAULT_DATA_FILE = os.path.join("data", "sheet1-业绩流水表.csv")
 
 HEADER_FILL = PatternFill("solid", fgColor="1D39C4")
@@ -90,10 +91,12 @@ def set_col_width(ws, widths):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def parse_date(s):
-    s = (s or "").strip().replace("-", "/")
+def parse_date(s: Any) -> Optional[dt.date]:
+    """兼容：yyyy/mm/dd、yyyy-mm-dd、m/d、并容忍前后空格。"""
+    s = ("" if s is None else str(s)).strip()
     if not s:
         return None
+    s = s.replace("-", "/")
     parts = s.split("/")
     try:
         if len(parts) == 3:
@@ -107,7 +110,7 @@ def parse_date(s):
     return None
 
 
-def to_int(x):
+def to_int(x: Any) -> int:
     if x is None:
         return 0
     if isinstance(x, (int, float)):
@@ -121,7 +124,7 @@ def to_int(x):
         return 0
 
 
-def pick(d, *names):
+def pick(d: Dict[str, Any], *names: str) -> Any:
     for n in names:
         if n in d:
             return d.get(n)
@@ -155,61 +158,78 @@ class Tx:
         return phone or name
 
 
-def _detect_data_path():
-    """优先使用你指定的真实数据文件；不存在则回退默认文件。"""
+def _detect_data_path() -> str:
     if os.path.exists(REAL_DATA_FILE):
         return REAL_DATA_FILE
     return DEFAULT_DATA_FILE
 
 
-def load_txs():
-    path = _detect_data_path()
-    # 兼容常见编码问题：优先 utf-8，失败后尝试 gbk
-    rows = None
+def _read_csv_dict_rows(path: str) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """读取 CSV（兼容 utf-8/utf-8-sig/gbk）。返回 fieldnames 与 dict rows。"""
     last_err = None
     for enc in ("utf-8", "utf-8-sig", "gbk"):
         try:
             with open(path, encoding=enc) as f:
-                rows = list(csv.DictReader(f))
-            last_err = None
-            break
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                return (reader.fieldnames or []), rows
         except Exception as e:
             last_err = e
-            rows = None
-    if rows is None:
-        raise last_err
+    raise last_err
 
-    txs = []
-    for r in rows:
-        biz_date = parse_date(pick(r, "开单日期", "开单日期 ", "业务日期"))
+
+def load_txs_with_issues() -> Tuple[List[Tx], List[str], List[Dict[str, Any]]]:
+    """返回：有效交易 txs、原始表头 fieldnames、问题行 issues。
+
+    issues 每条包含：row_index(从2开始)、reason、raw(原始字典)
+    """
+    path = _detect_data_path()
+    fieldnames, rows = _read_csv_dict_rows(path)
+
+    txs: List[Tx] = []
+    issues: List[Dict[str, Any]] = []
+
+    for i, r in enumerate(rows, start=2):  # start=2 表示 CSV 第2行是第一条数据
+        # 1) 日期
+        biz_raw = pick(r, "开单日期", "业务日期")
+        biz_date = parse_date(biz_raw)
         if not biz_date:
+            issues.append({"row_index": i, "reason": "开单日期解析失败", "raw": r})
             continue
+
+        # 2) 必填字段
         company = (pick(r, "公司主体") or "").strip()
-        sales_company = (pick(r, "销售公司") or "").strip() or company
-        tx = Tx(
-            biz_date=biz_date,
-            lead_date=parse_date(pick(r, "客户进线日", "客户进线日期")),
-            company=company,
-            sales_company=sales_company,
-            seller=(pick(r, "销售", "销售姓名") or "").strip(),
-            customer=(pick(r, "客户姓名") or "").strip(),
-            phone=(pick(r, "客户电话") or "").strip(),
-            deposit=to_int(pick(r, "订金", "定金")),
-            signup=to_int(pick(r, "报名费")),
-            tail=to_int(pick(r, "尾款")),
-            full=to_int(pick(r, "全款")),
-            refund=to_int(pick(r, "退款")),
-            total_price=to_int(pick(r, "产品总价")),
-            note=(pick(r, "备注") or "").strip(),
-            age=str(pick(r, "年龄") or "").strip(),
-        )
-        if not tx.company or not tx.seller or not tx.customer:
+        seller = (pick(r, "销售", "销售姓名") or "").strip()
+        customer = (pick(r, "客户姓名") or "").strip()
+        if not company or not seller or not customer:
+            issues.append({"row_index": i, "reason": "必填字段为空(公司主体/销售/客户姓名)", "raw": r})
             continue
-        txs.append(tx)
-    return txs
 
+        sales_company = (pick(r, "销售公司") or "").strip() or company
 
-# 下面逻辑与 v10.3 保持一致（略去无关改动）
+        txs.append(
+            Tx(
+                biz_date=biz_date,
+                lead_date=parse_date(pick(r, "客户进线日", "客户进线日期")),
+                company=company,
+                sales_company=sales_company,
+                seller=seller,
+                customer=customer,
+                phone=(pick(r, "客户电话") or "").strip(),
+                deposit=to_int(pick(r, "订金", "定金")),
+                signup=to_int(pick(r, "报名费")),
+                tail=to_int(pick(r, "尾款")),
+                full=to_int(pick(r, "全款")),
+                refund=to_int(pick(r, "退款")),
+                total_price=to_int(pick(r, "产品总价")),
+                note=(pick(r, "备注") or "").strip(),
+                age=str(pick(r, "年龄") or "").strip(),
+            )
+        )
+
+    # 如果整表都解析失败，issues 里会有原因，方便定位
+    return txs, fieldnames, issues
+
 
 def summarize_orders(txs):
     agg = defaultdict(lambda: {"company": "", "sales_company": "", "seller": "", "customer": "", "phone": "", "lead_date": None, "deposit": 0, "signup": 0, "tail": 0, "full": 0, "refund": 0, "total_price": 0})
@@ -373,6 +393,39 @@ def write_sheet_table(ws, title, headers, rows, widths=None, highlight=None):
                 ws.cell(row=row_idx, column=hl_col).font = rules[v]
         row_idx += 1
     set_col_width(ws, widths or [14] * len(headers))
+    ws.freeze_panes = "A3"
+
+
+def write_import_issues_sheet(wb, data_path: str, fieldnames: List[str], issues: List[Dict[str, Any]]):
+    """把导入问题行写到一个 Sheet，方便你回到源数据修正。"""
+    ws = wb.create_sheet("问题明细")
+    ws.sheet_view.showGridLines = False
+
+    base_headers = ["行号(CSV)", "问题原因"]
+    headers = base_headers + (fieldnames or [])
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    ws.cell(row=1, column=1, value="导入问题明细（数据源：%s）" % data_path).fill = TITLE_FILL
+    ws.cell(row=1, column=1).font = Font(bold=True, color="FFFFFF", size=14)
+    ws.cell(row=1, column=1).alignment = LEFT
+
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=2, column=i, value=h)
+    set_header_row(ws, 2, len(headers))
+
+    r = 3
+    for item in issues:
+        raw = item.get("raw") or {}
+        ws.cell(row=r, column=1, value=item.get("row_index"))
+        ws.cell(row=r, column=2, value=item.get("reason"))
+        for j, fn in enumerate(fieldnames or [], start=3):
+            ws.cell(row=r, column=j, value=raw.get(fn, ""))
+        style_row(ws, r, len(headers), SUB_FILL if r % 2 == 1 else None, align=LEFT)
+        r += 1
+
+    # 宽度
+    widths = [10, 26] + [14] * max(1, len(headers) - 2)
+    set_col_width(ws, widths[: len(headers)])
     ws.freeze_panes = "A3"
 
 
@@ -557,7 +610,9 @@ def build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary
 
 
 def main():
-    txs = load_txs()
+    data_path = _detect_data_path()
+    txs, fieldnames, import_issues = load_txs_with_issues()
+
     order_headers, order_rows = summarize_orders(txs)
     seller_headers, seller_rows = summarize_seller(order_rows)
     sales_company_headers, sales_company_rows = summarize_group(order_rows, 1, "销售公司")
@@ -570,6 +625,7 @@ def main():
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
+
     build_dashboard(wb, txs, order_rows, seller_rows, company_rows, lead_summary_rows, abnormal_rows)
 
     ws1 = wb.create_sheet("原始流水")
@@ -599,8 +655,13 @@ def main():
     ws9 = wb.create_sheet("异常校验")
     write_sheet_table(ws9, "异常校验", abnormal_headers, abnormal_rows, widths=[14, 10, 10, 12, 14, 28])
 
+    # 新增：问题明细
+    write_import_issues_sheet(wb, data_path, fieldnames, import_issues)
+
     wb.save(OUTPUT_FILE)
     print("✅ 已生成老板汇报版仪表盘：%s" % OUTPUT_FILE)
+    print("ℹ️ 使用数据源：%s" % data_path)
+    print("ℹ️ 导入成功行数：%s，问题行数：%s" % (len(txs), len(import_issues)))
 
 
 if __name__ == "__main__":
